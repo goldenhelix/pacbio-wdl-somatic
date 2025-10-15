@@ -1,0 +1,273 @@
+name: Alignment Statistics
+description: Generate and summarize alignment statistics with SeqKit
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 16
+
+parameters:
+  - name: phased_bam
+    label: Phased BAM
+    type: file
+    pattern_match:
+      - "*.bam"
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: "no_append"
+
+  - name: cache_udocker_images
+    label: Cache Udocker Images
+    type: boolean
+    value: true
+
+steps:
+  - name: alignment_stats
+    type: cmd
+    description: Generate and summarize alignment statistics with SeqKit
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting Alignment Statistics Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - phased_bam: $phased_bam"
+        echo "  - output_folder: $output_folder"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+
+        # Function to handle miniwdl failure
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up resource path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
+
+        # Set up udocker environment
+        export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
+        export MINIWDL__FILE_IO__ALLOW_ANY_INPUT=true
+        export MINIWDL__SCHEDULER__TASK_CONCURRENCY=8
+        export UDOCKER_DIR=/scratch/.udocker
+
+        # Pull udocker layers from cache if requested
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ] && [ "$cache_udocker_images" = true ]; then
+          echo "Pulling udocker image from cache..."
+          mkdir -p /scratch/.udocker
+          cp -R "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"/* /scratch/.udocker/ || \
+            { echo "Failed to copy udocker cache to /scratch/.udocker; will pull layers instead"; }
+        fi
+
+        # Get BAM index and check inputs exist
+        phased_bam_index="${phased_bam}.bai"
+        if [ ! -f "$phased_bam" ]; then
+          echo "Error: Phased BAM file not found at $phased_bam"
+          exit 1
+        fi
+        if [ ! -f "$phased_bam_index" ]; then
+          echo "Error: BAM index file not found at $phased_bam_index"
+          exit 1
+        fi
+
+        # Copy input files to /scratch
+        echo "Copying input files..."
+        cp "$phased_bam" /scratch/
+        cp "$phased_bam_index" /scratch/
+        LOCAL_PHASED_BAM="/scratch/$(basename "$phased_bam")"
+        LOCAL_PHASED_BAM_INDEX="/scratch/$(basename "$phased_bam_index")"
+
+        # Run SeqKit
+        echo "================================================"
+        echo "🚀 STARTING SEQKIT BAMSTATS ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Phased BAM: $(basename "$LOCAL_PHASED_BAM") ($(format_file_size "$LOCAL_PHASED_BAM" "GB") GB)"
+        echo "  - BAM Index: $(basename "$LOCAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_PHASED_BAM_INDEX" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        SEQKIT_START_TIME=$(date +%s)
+        
+        # Set up input JSON
+        jq -n \
+          --arg phased_bam "$LOCAL_PHASED_BAM" \
+          --arg phased_bam_index "$LOCAL_PHASED_BAM_INDEX" \
+          --argjson threads "$AGENT_CPU_CORES" \
+          '{
+            "seqkit_bamstats.bam": $phased_bam,
+            "seqkit_bamstats.bam_index": $phased_bam_index,
+            "seqkit_bamstats.threads": $threads
+          }' > /scratch/seqkit_bamstats_inputs.json
+
+        # Run SeqKit with miniwdl
+        set +e
+        BAMSTATS_MINIWDL_OUTPUT=$(miniwdl run \
+          --task seqkit_bamstats \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/seqkit_bamstats_inputs.json 2>/dev/null
+        )
+        BAMSTATS_MINIWDL_EXIT_CODE=$?
+        set -e
+
+        if [ $BAMSTATS_MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "SeqKit BAM statistics failed with exit code $BAMSTATS_MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $BAMSTATS_MINIWDL_EXIT_CODE
+        fi
+
+        # Post-execution logging for SeqKit
+        SEQKIT_END_TIME=$(date +%s)
+        SEQKIT_DURATION=$((SEQKIT_END_TIME - SEQKIT_START_TIME))
+        SEQKIT_DURATION_HOUR=$((SEQKIT_DURATION / 3600))
+        SEQKIT_DURATION_MIN=$(((SEQKIT_DURATION % 3600) / 60))
+        SEQKIT_DURATION_SEC=$((SEQKIT_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ SEQKIT BAMSTATS ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${SEQKIT_DURATION_HOUR}h ${SEQKIT_DURATION_MIN}m ${SEQKIT_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        
+        # Extract and report output file sizes
+        echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            file_size_mb=$(format_file_size "$output_file" "MB")
+            echo "  - $(basename "$output_file") ($file_size_mb MB)"
+          fi
+        done
+        echo "================================================"
+
+        # Copy output of seqkit_bamstats to output folder
+        echo "Copying SeqKit outputs..."
+        echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            cp "$output_file" "$output_folder"/
+          fi
+        done
+
+        # Get seqkit_alignment_stats from BAMSTATS_MINIWDL_OUTPUT
+        LOCAL_SEQKIT_ALIGNMENT_STATS=$(echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs."seqkit_bamstats.seqkit_alignment_stats"')
+        
+        # Run Summary Task
+        echo "================================================"
+        echo "🚀 STARTING SUMMARY TASK ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - SeqKit Alignment Stats: $(basename "$LOCAL_SEQKIT_ALIGNMENT_STATS") ($(format_file_size "$LOCAL_SEQKIT_ALIGNMENT_STATS" "KB") KB)"
+        echo "⚙️  Configuration:"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        SUMMARY_START_TIME=$(date +%s)
+        
+        # Set up input JSON
+        jq -n \
+          --arg seqkit_alignment_stats "$LOCAL_SEQKIT_ALIGNMENT_STATS" \
+          --argjson threads "$AGENT_CPU_CORES" \
+          '{
+            "summarize_seqkit_alignment.seqkit_alignment_stats": $seqkit_alignment_stats,
+            "summarize_seqkit_alignment.threads": $threads
+          }' > /scratch/summarize_seqkit_alignment_inputs.json
+
+        # Run summary task with miniwdl
+        set +e
+        SUMMARY_MINIWDL_OUTPUT=$(miniwdl run \
+          --task summarize_seqkit_alignment \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/summarize_seqkit_alignment_inputs.json 2>/dev/null)
+        SUMMARY_MINIWDL_EXIT_CODE=$?
+        set -e
+
+        if [ $SUMMARY_MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "Summary task failed with exit code $SUMMARY_MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $SUMMARY_MINIWDL_EXIT_CODE
+        fi
+
+        # Post-execution logging for Summary Task
+        SUMMARY_END_TIME=$(date +%s)
+        SUMMARY_DURATION=$((SUMMARY_END_TIME - SUMMARY_START_TIME))
+        SUMMARY_DURATION_HOUR=$((SUMMARY_DURATION / 3600))
+        SUMMARY_DURATION_MIN=$(((SUMMARY_DURATION % 3600) / 60))
+        SUMMARY_DURATION_SEC=$((SUMMARY_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ SUMMARY TASK ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${SUMMARY_DURATION_HOUR}h ${SUMMARY_DURATION_MIN}m ${SUMMARY_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        
+        # Extract and report output file sizes
+        echo "$SUMMARY_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            file_size_kb=$(format_file_size "$output_file" "KB")
+            echo "  - $(basename "$output_file") ($file_size_kb KB)"
+          fi
+        done
+        echo "================================================"
+        
+        # Copy output of summarize_seqkit_alignment to output folder
+        echo "Copying summary outputs..."
+        echo "$SUMMARY_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            cp "$output_file" "$output_folder"/
+          fi
+        done
+
+        # Copy udocker cache to output folder
+        if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"
+          cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
+        fi
+
+        echo "*************************"
+        echo "Alignment statistics completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"

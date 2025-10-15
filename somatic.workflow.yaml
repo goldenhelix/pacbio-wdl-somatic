@@ -1,0 +1,231 @@
+name: PacBio WGS Somatic Workflow
+description: Run PacBio WGS somatic analysis
+stages:
+  - name: Alignment with pbmm2
+    description: Align PacBio HiFi reads to a reference genome using pbmm2 aligner.
+    task_path: tasks/alignment.task.yaml
+    depends_on: []
+
+    glob_parameter:
+      label: uBAM Base Folder
+      path:
+        type: directory
+        supports_location_mode: 'read_only'
+      glob_ex: '*/*.bam'
+      output_parameters:
+        - task_parameter_name: sample_name
+          expression: '${1}'
+        - task_parameter_name: input_folder
+          expression: '${file_directory}'
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: directory
+        supports_location_mode: 'no_append'
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: boolean
+        value: true
+
+  - name: Generate Batch Parameter File
+    description: Generate a batch parameter file associating tumor and normal samples
+    task_path: tasks/generate_batch_parameter_file.task.yaml
+    depends_on: 
+      - Alignment with pbmm2
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: sample_type
+        label: Sample Type
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "Somatic"
+
+  - name: Depth of Coverage with mosdepth
+    description: Calculate depth of coverage for BAM.
+    task_path: tasks/mosdepth.task.yaml
+    depends_on:
+      - Alignment with pbmm2
+
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Alignment with pbmm2
+        parameter: output_folder
+      glob_ex: '**/*.aligned.bam'
+      output_parameters:
+        - task_parameter_name: aligned_bam
+          expression: '${0}'
+        - task_parameter_name: sample_name
+          expression: '${2}'
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"
+
+  - name: DeepSomatic
+    description: Call variants from PacBio HiFi aligned BAM using DeepSomatic.
+    task_path: tasks/deepsomatic.task.yaml
+    depends_on:
+      - Generate Batch Parameter File
+
+    batch_file_parameter:
+      path:
+        base_path:
+          type: stage
+          stage: Alignment with pbmm2
+          parameter: output_folder
+        file: "batch_parameters.csv"
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"
+        
+  - name: Phasing with HiPhase
+    description: Phase VCFs and haplotag BAMs
+    task_path: tasks/hiphase.task.yaml
+    depends_on:
+      - DeepSomatic
+    
+    batch_file_parameter:
+      path:
+        base_path:
+          type: stage
+          stage: Alignment with pbmm2
+          parameter: output_folder
+        file: "batch_parameters.csv"
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"
+
+  - name: Alignment Statistics
+    description: Generate alignment statistics
+    task_path: tasks/alignment_stats.task.yaml
+    depends_on:
+      - Phasing with HiPhase
+
+    glob_parameter:
+      label: Alignment Folder
+      path:
+        type: stage
+        stage: Alignment with pbmm2
+        parameter: output_folder
+      glob_ex: '**/*.hiphase.bam'
+      output_parameters:
+        - task_parameter_name: phased_bam
+          expression: '${0}'
+
+    task_parameters:
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"
+
+  - name: Structural Variants
+    description: Call structural variants with Severus, Wakhan, and CNVKit
+    task_path: tasks/structural_variants.task.yaml
+    depends_on:
+      - Phasing with HiPhase
+
+    batch_file_parameter:
+      path:
+        base_path:
+          type: stage
+          stage: Alignment with pbmm2
+          parameter: output_folder
+        file: "batch_parameters.csv"
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"
+
+  - name: CpG Pileup and DMR Analysis
+    description: Generate CpG methylation scores and perform differential methylation analysis
+    task_path: tasks/cpg_dmr.task.yaml
+    depends_on:
+      - Phasing with HiPhase
+
+    batch_file_parameter:
+      path:
+        base_path:
+          type: stage
+          stage: Alignment with pbmm2
+          parameter: output_folder
+        file: "batch_parameters.csv"
+
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: output_folder
+        label: Output Folder
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${output_folder}"
+
+      - name: cache_udocker_images
+        label: Cache Udocker Image
+        type: stage
+        stage: Alignment with pbmm2
+        stage_parameter_expression: "${cache_udocker_images}"

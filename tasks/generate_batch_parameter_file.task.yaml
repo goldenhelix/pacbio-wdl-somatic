@@ -1,0 +1,206 @@
+name: Generate Batch Parameter File
+description: Generate a batch parameter file for PacBio WDL pipeline
+auto_generate_session_for_account: "{workspaceBot}"
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The input folder for the resulting alignment files, VCFs, and (optional) metrics files."
+
+  - name: sample_type
+    label: Sample Type
+    type: enum
+    choices: [Somatic, Family]
+    optional: false
+
+agent_requirements:
+  cpu_cores: 1
+  memory_gb: 1
+
+steps:
+  - name: generate_batch_parameter_file
+    description: Generate a batch parameter file
+    type: cmd
+    docker:
+      image: ${VSPIPELINE_DOCKER_IMAGE}
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting Generate Batch Parameter File Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - input_folder: $input_folder"
+        echo "  - sample_type: $sample_type"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+
+        cd /scratch
+
+        # Create output file
+        echo "Creating batch parameter file for $sample_type samples..."
+        if [ "$sample_type" == "Family" ]; then
+            # Use a TSV file to store family relationships
+            # This allows us to support comma-separated values in the bam_list column
+            output_file="family_batch_parameters.tsv"
+            echo "input_file" > "$output_file"
+        elif [ "$sample_type" == "Somatic" ]; then 
+            output_file="batch_parameters.csv"
+            echo "tumor_sample_name,normal_sample_name,tumor_aligned_bam,normal_aligned_bam" > "$output_file"
+        else
+            echo "Invalid sample type: $sample_type"
+            exit 1
+        fi
+
+        # Find sample names from BAM/CRAM files by taking the prefix before first underscore
+        echo "Scanning input folder for samples..."
+        sample_names=$(find "$input_folder" -maxdepth 1 -type f -name "*.aligned.bam" | 
+            while read -r file; do
+                basename "$file" .aligned.bam
+            done | sort -u)
+
+        # Handle somatic or family case
+        case "$sample_type" in 
+            "Somatic")
+                for sample_name in $sample_names; do
+
+                    # Check if sample is in catalog
+                    
+                    # Check if sample is a tumor sample
+                    tumor_sample=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Tumor" | tail -n 1 | tr -d '\r\n\t ')
+                    
+                    case "$tumor_sample" in
+                        "")
+                            echo "Sample $sample_name not found in catalog, assuming tumor only"
+                            ;;
+                        "Tumor")
+                            echo "Sample $sample_name is a tumor sample; adding to batch parameter file"
+                            ;;
+                        "Normal")
+                            echo "Sample $sample_name is a normal sample; skipping sample"
+                            continue
+                            ;;
+                        *)
+                            echo "Sample $sample_name is specified as normal, assuming tumor only"
+                            ;;
+                    esac
+
+                    # Add sample to batch parameter file
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}.aligned.bam" -o -name "${sample_name}.aligned.cram" \) | head -n 1)
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+
+                    if [ -z "$sample_bam" ]; then
+                        echo "${sample_name}.aligned.bam not found in $input_folder"
+                        continue
+                    fi
+
+                    # First, look up normal sample
+                    normal_sample_name="$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')"
+                    if [ -z "$normal_sample_name" ]; then
+                        echo "$sample_name,,$sample_abs," >> "$output_file"
+                    else
+                        normal_sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${normal_sample_name}.aligned.bam" -o -name "${normal_sample_name}.aligned.cram" \) | head -n 1)
+                        normal_sample_abs=$(echo "$normal_sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                        echo "$sample_name,$normal_sample_name,$sample_abs,$normal_sample_abs" >> "$output_file"
+                    fi
+
+                done
+                ;;
+
+            "Family")
+                for sample_name in $sample_names; do
+
+                    # Check if sample is already in batch file
+                    if grep -q "$sample_name" "$output_file"; then
+                        echo "Sample $sample_name already in batch file"
+                        continue
+                    fi
+
+                    # Check if sample is in catalog
+
+                    # Look for family relationships in catalog
+                    sample_family=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Mother","Father" --output=tsv | tail -n 1 | tr -d '\r\n ')
+
+                    # If sample family is empty, skip
+                    if [ -z "$sample_family" ]; then
+                        continue
+                    fi
+                    # Parse family relationships
+                    mother=$(echo "$sample_family" | cut -f1)
+                    father=$(echo "$sample_family" | cut -f2)
+
+                    # Find BAM for sample, mother, and father
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}.aligned.bam" -o -name "${sample_name}.aligned.cram" \) | head -n 1)
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    mother_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${mother}.aligned.bam" -o -name "${mother}.aligned.cram" \) | head -n 1)
+                    mother_abs=$(echo "$mother_bam" | sed "s|^$WORKSPACE_DIR||")
+                    father_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${father}.aligned.bam" -o -name "${father}.aligned.cram" \) | head -n 1)
+                    father_abs=$(echo "$father_bam" | sed "s|^$WORKSPACE_DIR||")
+
+                    # Check if sample BAM exists (required)
+                    if [ -z "$sample_bam" ]; then
+                        continue
+                    fi
+
+                    # Add to output file
+                    if [ ! -z "$mother_bam" ]; then
+                        mother_abs="$mother_abs"
+                    else
+                        mother_abs=""
+                    fi
+                    if [ ! -z "$father_bam" ]; then
+                        father_abs="$father_abs"
+                    else
+                        father_abs=""
+                    fi
+                    echo "$sample_abs,$mother_abs,$father_abs" >> "$output_file"
+
+                done
+                ;;
+
+            *)
+                echo "Invalid sample type: $sample_type"
+                exit 1
+                ;;
+        esac
+
+        echo "Copying batch parameter file..."
+        cp "$output_file" "$input_folder"/
+
+        echo "*************************"
+        echo "Generate Batch Parameter File completed successfully"
+        echo "Output file copied to: $input_folder/$output_file"
+        echo "*************************"

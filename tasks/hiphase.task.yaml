@@ -1,0 +1,395 @@
+name: Phasing with HiPhase
+description: Phase VCFs and haplotag BAMs with HiPhase
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 16
+
+parameters: 
+  - name: tumor_sample_name
+    label: Sample Name (tumor)
+    type: string
+    help: "The name of the tumor sample with BAMs and VCFs to be phased."
+
+  - name: normal_sample_name
+    label: Sample Name (normal)
+    type: string
+    optional: true
+    help: "The name of the normal sample with VCFs to be phased (note that only a tumor BAM is phased). If not provided, the workflow will run in tumor-only mode."
+
+  - name: tumor_aligned_bam
+    label: Aligned BAM (tumor)
+    type: file
+    pattern_match:
+      - "*.bam"
+    help: "The aligned BAM file for the tumor sample. VCFs will be searched for in the same directory as the BAM file."
+
+  - name: normal_aligned_bam
+    label: Aligned BAM (normal)
+    type: file
+    pattern_match:
+      - "*.bam"
+    optional: true
+    help: "The aligned BAM file for the normal sample. Only required when normal_sample_name is provided."
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: cache_udocker_images
+    label: Cache Udocker Image
+    type: boolean
+    value: true
+
+steps:
+  - name: hiphase
+    type: cmd
+    description: Phase VCFs and haplotag BAMs with HiPhase
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting Phasing with HiPhase Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - tumor_sample_name: $tumor_sample_name"
+        echo "  - normal_sample_name: $normal_sample_name"
+        echo "  - tumor_aligned_bam: $tumor_aligned_bam"
+        echo "  - normal_aligned_bam: $normal_aligned_bam"
+        echo "  - output_folder: $output_folder"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+        
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up resource path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
+        
+        # Set up reference files (hardcoded from ref_map)
+        REF_FASTA="${PB_RESOURCES_DIR}/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta"
+        REF_INDEX="${PB_RESOURCES_DIR}/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta.fai"
+        
+        # Verify reference files exist
+        if [ ! -f "$REF_FASTA" ]; then
+          echo "Error: Reference FASTA file not found at $REF_FASTA"
+          echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+          exit 1
+        fi
+        
+        if [ ! -f "$REF_INDEX" ]; then
+          echo "Error: Reference FASTA index file not found at $REF_INDEX"
+          echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+          exit 1
+        fi
+
+        # Check for required input files
+        
+        # Validate normal sample parameters
+        if [ -n "$normal_sample_name" ] && [ -z "$normal_aligned_bam" ]; then
+          echo "Warning: Normal sample name provided but no normal BAM file specified. Running in tumor-only mode."
+          normal_sample_name=""
+        elif [ -z "$normal_sample_name" ] && [ -n "$normal_aligned_bam" ]; then
+          echo "Warning: Normal BAM file provided but no normal sample name specified. Running in tumor-only mode."
+          normal_aligned_bam=""
+        fi
+
+        # Check for BAM and BAM index
+        if [ ! -f "$tumor_aligned_bam" ]; then
+          echo "Error: Aligned BAM file not found at $tumor_aligned_bam"
+          exit 1
+        fi
+
+        tumor_aligned_bam_index="${tumor_aligned_bam}.bai"
+        if [ ! -f "$tumor_aligned_bam_index" ]; then
+          echo "Error: BAM index file not found at $tumor_aligned_bam_index"
+          exit 1
+        fi
+
+        # Get input directory
+        input_dir=$(dirname "$tumor_aligned_bam")
+
+        # Check for clair3 VCF and index
+
+        tumor_clair3_vcf="${input_dir}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+        tumor_clair3_vcf_index="${tumor_clair3_vcf}.tbi"
+
+        if [ ! -f "$tumor_clair3_vcf" ]; then
+          echo "Error: Clair3 VCF file not found at $tumor_clair3_vcf"
+          exit 1
+        fi
+
+        if [ ! -f "$tumor_clair3_vcf_index" ]; then
+          echo "Error: Clair3 VCF index file not found at $tumor_clair3_vcf_index"
+          exit 1
+        fi
+
+        # Check for DeepSomatic VCF and index 
+
+        deepsomatic_vcf="${input_dir}/${tumor_sample_name}_deepsomatic.vcf.gz"
+        deepsomatic_vcf_index="${deepsomatic_vcf}.tbi"
+        if [ ! -f "$deepsomatic_vcf" ]; then
+          echo "Error: DeepSomatic VCF file not found at $deepsomatic_vcf"
+          exit 1
+        fi
+        if [ ! -f "$deepsomatic_vcf_index" ]; then
+          echo "Error: DeepSomatic VCF index file not found at $deepsomatic_vcf_index"
+          exit 1
+        fi
+      
+        # Check for normal VCF and index if normal sample name is provided
+        if [ -n "$normal_sample_name" ]; then
+          normal_clair3_vcf="${input_dir}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+          normal_clair3_vcf_index="${normal_clair3_vcf}.tbi"
+          if [ ! -f "$normal_clair3_vcf" ]; then
+            echo "Error: Clair3 VCF file not found at $normal_clair3_vcf"
+            exit 1
+          fi
+          if [ ! -f "$normal_clair3_vcf_index" ]; then
+            echo "Error: Clair3 VCF index file not found at $normal_clair3_vcf_index"
+            exit 1
+          fi
+          
+          # Check for normal BAM and BAM index
+          if [ ! -f "$normal_aligned_bam" ]; then
+            echo "Error: Normal aligned BAM file not found at $normal_aligned_bam"
+            exit 1
+          fi
+          
+          normal_aligned_bam_index="${normal_aligned_bam}.bai"
+          if [ ! -f "$normal_aligned_bam_index" ]; then
+            echo "Error: Normal BAM index file not found at $normal_aligned_bam_index"
+            exit 1
+          fi
+        fi
+
+        # Copy all inputs to /scratch
+        cp "$tumor_aligned_bam" "$tumor_aligned_bam_index" "$REF_FASTA" "$REF_INDEX" "$tumor_clair3_vcf" "$tumor_clair3_vcf_index" \
+            "$deepsomatic_vcf" "$deepsomatic_vcf_index" /scratch/
+
+        if [ -n "$normal_sample_name" ]; then
+          cp "$normal_clair3_vcf" "$normal_clair3_vcf_index" "$normal_aligned_bam" "$normal_aligned_bam_index" /scratch/
+        fi
+
+        # Set local file paths
+        LOCAL_BAM="/scratch/$(basename "${tumor_aligned_bam}")"
+        LOCAL_BAM_INDEX="/scratch/$(basename "${tumor_aligned_bam_index}")"
+        LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
+        LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
+        LOCAL_CLAIR3_VCF="/scratch/$(basename "${tumor_clair3_vcf}")"
+        LOCAL_CLAIR3_VCF_INDEX="/scratch/$(basename "${tumor_clair3_vcf_index}")"
+        LOCAL_DEEPSOMATIC_VCF="/scratch/$(basename "${deepsomatic_vcf}")"
+        LOCAL_DEEPSOMATIC_VCF_INDEX="/scratch/$(basename "${deepsomatic_vcf_index}")"
+        if [ -n "$normal_sample_name" ]; then
+          LOCAL_NORMAL_CLAIR3_VCF="/scratch/$(basename "${normal_clair3_vcf}")"
+          LOCAL_NORMAL_CLAIR3_VCF_INDEX="/scratch/$(basename "${normal_clair3_vcf_index}")"
+          LOCAL_NORMAL_BAM="/scratch/$(basename "${normal_aligned_bam}")"
+          LOCAL_NORMAL_BAM_INDEX="/scratch/$(basename "${normal_aligned_bam_index}")"
+        fi
+
+        # Generate phased VCF names (matching downstream.wdl line 83)
+        PHASED_CLAIR3_VCF_NAME="$(basename "${tumor_clair3_vcf}" .vcf.gz).phased.vcf.gz"
+        PHASED_DEEPSOMATIC_VCF_NAME="$(basename "${deepsomatic_vcf}" .vcf.gz).phased.vcf.gz"
+        if [ -n "$normal_sample_name" ]; then
+          PHASED_NORMAL_CLAIR3_VCF_NAME="$(basename "${normal_clair3_vcf}" .vcf.gz).phased.vcf.gz"
+        fi
+
+        # Generate phased VCF index names
+        PHASED_CLAIR3_VCF_INDEX_NAME="$(basename "${tumor_clair3_vcf_index}" .vcf.gz.tbi).phased.vcf.gz.tbi"
+        PHASED_DEEPSOMATIC_VCF_INDEX_NAME="$(basename "${deepsomatic_vcf_index}" .vcf.gz.tbi).phased.vcf.gz.tbi"
+        if [ -n "$normal_sample_name" ]; then
+          PHASED_NORMAL_CLAIR3_VCF_INDEX_NAME="$(basename "${normal_clair3_vcf_index}" .vcf.gz.tbi).phased.vcf.gz.tbi"
+        fi
+
+        cd /scratch
+        # Check if HiPhase is already cached, otherwise download and extract
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/hiphase_cache/hiphase-v1.5.0-x86_64-unknown-linux-gnu" ] && [ "$cache_udocker_images" = true ]; then
+          cp -r "${WORKSPACE_DIR}/${RESOURCES_PATH}/hiphase_cache/hiphase-v1.5.0-x86_64-unknown-linux-gnu" /scratch/
+        else
+          curl -L -O https://github.com/PacificBiosciences/HiPhase/releases/download/v1.5.0/hiphase-v1.5.0-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf hiphase-v1.5.0-x86_64-unknown-linux-gnu.tar.gz
+        fi
+        HIPHASE_BIN="/scratch/hiphase-v1.5.0-x86_64-unknown-linux-gnu/hiphase"
+        chmod +x "$HIPHASE_BIN"
+
+        # Verify hiphase binary
+        "$HIPHASE_BIN" --version >/dev/null 2>&1
+
+        # Run HiPhase analysis
+        echo "================================================"
+        echo "🚀 STARTING HIPHASE ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM" "GB") GB)"
+        echo "  - Clair3 VCF: $(basename "$LOCAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_CLAIR3_VCF" "MB") MB)"
+        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF" "MB") MB)"
+        if [ -n "$normal_sample_name" ]; then
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
+          echo "  - Normal Clair3 VCF: $(basename "$LOCAL_NORMAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_NORMAL_CLAIR3_VCF" "MB") MB)"
+        fi
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "⚙️  Configuration:"
+        echo "  - Tumor Sample: $tumor_sample_name"
+        if [ -n "$normal_sample_name" ]; then
+          echo "  - Normal Sample: $normal_sample_name"
+        fi
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        HIPHASE_START_TIME=$(date +%s)
+        
+        set +e
+
+        # Running tumor hiphase
+        "$HIPHASE_BIN" \
+          --threads $AGENT_CPU_CORES \
+          --sample-name "$tumor_sample_name" \
+          --vcf "$LOCAL_CLAIR3_VCF" \
+          --vcf "$LOCAL_DEEPSOMATIC_VCF" \
+          --output-vcf "$PHASED_CLAIR3_VCF_NAME" \
+          --output-vcf "$PHASED_DEEPSOMATIC_VCF_NAME" \
+          --bam "$LOCAL_BAM" \
+          --output-bam "$tumor_sample_name.hiphase.bam" \
+          --reference "$LOCAL_REF_FASTA" \
+          --summary-file "$tumor_sample_name.hiphase.stats.tsv" \
+          --blocks-file "$tumor_sample_name.hiphase.blocks.tsv" \
+          --haplotag-file "$tumor_sample_name.hiphase.haplotags.tsv" 2>/dev/null
+
+        # Running normal hiphase
+        if [ -n "$normal_sample_name" ]; then
+          "$HIPHASE_BIN" \
+            --threads $AGENT_CPU_CORES \
+            --sample-name "$normal_sample_name" \
+            --vcf "$LOCAL_NORMAL_CLAIR3_VCF" \
+            --output-vcf "$PHASED_NORMAL_CLAIR3_VCF_NAME" \
+            --bam "$LOCAL_NORMAL_BAM" \
+            --output-bam "$normal_sample_name.hiphase.bam" \
+            --reference "$LOCAL_REF_FASTA" \
+            --summary-file "$normal_sample_name.hiphase.stats.tsv" \
+            --blocks-file "$normal_sample_name.hiphase.blocks.tsv" \
+            --haplotag-file "$normal_sample_name.hiphase.haplotags.tsv" 2>/dev/null
+        fi
+
+        HIPHASE_EXIT_CODE=$?
+        set -e
+
+        if [ $HIPHASE_EXIT_CODE -ne 0 ]; then
+          echo "HiPhase failed with exit code $HIPHASE_EXIT_CODE"
+          exit $HIPHASE_EXIT_CODE
+        fi
+
+        # Post-execution logging for HiPhase
+        HIPHASE_END_TIME=$(date +%s)
+        HIPHASE_DURATION=$((HIPHASE_END_TIME - HIPHASE_START_TIME))
+        HIPHASE_DURATION_HOUR=$((HIPHASE_DURATION / 3600))
+        HIPHASE_DURATION_MIN=$(((HIPHASE_DURATION % 3600) / 60))
+        HIPHASE_DURATION_SEC=$((HIPHASE_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ HIPHASE ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${HIPHASE_DURATION_HOUR}h ${HIPHASE_DURATION_MIN}m ${HIPHASE_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Phased Clair3 VCF: $PHASED_CLAIR3_VCF_NAME"
+        echo "  - Phased DeepSomatic VCF: $PHASED_DEEPSOMATIC_VCF_NAME"
+        echo "  - Phased Tumor BAM: ${tumor_sample_name}.hiphase.bam"
+        echo "  - Summary File: ${tumor_sample_name}.hiphase.stats.tsv"
+        echo "  - Blocks File: ${tumor_sample_name}.hiphase.blocks.tsv"
+        echo "  - Haplotag File: ${tumor_sample_name}.hiphase.haplotags.tsv"
+        if [ -n "$normal_sample_name" ]; then
+          echo "  - Phased Normal Clair3 VCF: $PHASED_NORMAL_CLAIR3_VCF_NAME"
+          echo "  - Phased Normal BAM: ${normal_sample_name}.hiphase.bam"
+          echo "  - Normal Summary File: ${normal_sample_name}.hiphase.stats.tsv"
+          echo "  - Normal Blocks File: ${normal_sample_name}.hiphase.blocks.tsv"
+          echo "  - Normal Haplotag File: ${normal_sample_name}.hiphase.haplotags.tsv"
+        fi
+        echo "================================================"
+
+        # Copy all outputs to output folder
+        echo "Copying HiPhase outputs..."
+        
+        # Copy phased VCFs
+        cp "$PHASED_CLAIR3_VCF_NAME" "$output_folder/"
+        cp "$PHASED_DEEPSOMATIC_VCF_NAME" "$output_folder/"
+        if [ -n "$normal_sample_name" ]; then
+          cp "$PHASED_NORMAL_CLAIR3_VCF_NAME" "$output_folder/"
+        fi
+        
+        # Copy phased VCF indices
+        cp "$PHASED_CLAIR3_VCF_INDEX_NAME" "$output_folder/"
+        cp "$PHASED_DEEPSOMATIC_VCF_INDEX_NAME" "$output_folder/"
+        if [ -n "$normal_sample_name" ]; then
+          cp "$PHASED_NORMAL_CLAIR3_VCF_INDEX_NAME" "$output_folder/"
+        fi
+        
+        # Copy haplotagged BAMs and indices
+        cp "$tumor_sample_name.hiphase.bam" "$output_folder/"
+        cp "$tumor_sample_name.hiphase.bam.bai" "$output_folder/"
+        if [ -n "$normal_sample_name" ]; then
+          cp "$normal_sample_name.hiphase.bam" "$output_folder/"
+          cp "$normal_sample_name.hiphase.bam.bai" "$output_folder/"
+        fi
+        
+        # Copy phase statistics files
+        cp "$tumor_sample_name.hiphase.stats.tsv" "$output_folder/"
+        cp "$tumor_sample_name.hiphase.blocks.tsv" "$output_folder/"
+        gzip "$tumor_sample_name.hiphase.haplotags.tsv"
+        cp "$tumor_sample_name.hiphase.haplotags.tsv.gz" "$output_folder/"
+        if [ -n "$normal_sample_name" ]; then
+          cp "$normal_sample_name.hiphase.stats.tsv" "$output_folder/"
+          cp "$normal_sample_name.hiphase.blocks.tsv" "$output_folder/"
+          gzip "$normal_sample_name.hiphase.haplotags.tsv"
+          cp "$normal_sample_name.hiphase.haplotags.tsv.gz" "$output_folder/"
+        fi
+        
+        # Copy HiPhase binary to cache for future use
+        if [ "$cache_udocker_images" = true ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/hiphase_cache"
+          cp -r /scratch/hiphase-v1.5.0-x86_64-unknown-linux-gnu "${WORKSPACE_DIR}/${RESOURCES_PATH}/hiphase_cache/" 2>/dev/null || true
+        fi
+        
+        echo "*************************"
+        echo "HiPhase VCF phasing and BAM haplotagging completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"

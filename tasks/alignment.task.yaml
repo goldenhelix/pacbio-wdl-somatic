@@ -1,0 +1,241 @@
+name: Tumor/Normal Alignment with pbmm2
+description: Align reads with pbmm2
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 48
+  memory_gb: 96
+
+parameters:
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'read_only'
+    help: The input folder containing the uBAMs for alignment. 
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: The output folder for the alignment results.
+
+  - name: sample_name
+    label: Sample Name
+    type: string
+    help: The name of the sample to align. All matching uBAMs will be aligned and merged. 
+
+  - name: cache_udocker_images
+    label: Cache Udocker Image
+    type: boolean
+    value: true
+
+steps:
+  - name: alignment
+    description: Align reads with pbmm2
+    type: cmd
+    args: 
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting Tumor/Normal Alignment Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - input_folder: $input_folder"
+        echo "  - output_folder: $output_folder"
+        echo "  - sample_name: $sample_name"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up resources path based on resources_path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
+
+        # set up env variables for miniwdl
+        export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
+        export MINIWDL__FILE_IO__ALLOW_ANY_INPUT=true
+        export MINIWDL__SCHEDULER__TASK_CONCURRENCY=8
+        export UDOCKER_DIR=/scratch/.udocker
+
+        # Get reference files
+        REF_FASTA="$PB_RESOURCES_DIR/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta"
+        REF_INDEX="$PB_RESOURCES_DIR/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta.fai"
+
+        # verify reference files exist
+        if [ ! -f "$REF_FASTA" ]; then
+          echo "Error: Reference FASTA file not found at $REF_FASTA"
+          echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+          exit 1
+        fi
+        
+        if [ ! -f "$REF_INDEX" ]; then
+          echo "Error: Reference FASTA index file not found at $REF_INDEX"
+          echo "Please ensure the PacBio WDL resources have been downloaded using the Download PacBio Reference Data Resources task"
+          exit 1
+        fi
+        
+        # copy reference files to /scratch
+        echo "Copying reference files to /scratch..."
+        cp "$REF_FASTA" /scratch/
+        cp "$REF_INDEX" /scratch/
+        LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
+        LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
+
+        # Pull udocker layers from cache if requested
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ] && [ "$cache_udocker_images" = true ]; then
+          echo "Pulling udocker image from cache..."
+          mkdir -p /scratch/.udocker
+          cp -R "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"/* /scratch/.udocker/ > /dev/null 2>&1 || \
+            { echo "Failed to copy udocker cache to /scratch/.udocker; will pull layers instead"; }
+        fi
+        
+        # Check whether sample is tumor or normal in catalog
+        echo "Checking sample type in catalog..."
+        set +e
+        sample_type=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Tumor" | tail -n 1 | tr -d '\r\n\t ')
+        sample_type_lookup_exit_code=$?
+        set -e
+        echo "Sample type: $sample_type"
+        
+        if [ $sample_type_lookup_exit_code -ne 0 ] || [ -z "$sample_type" ] || [ "$sample_type" != "Tumor" ] && [ "$sample_type" != "Normal" ]; then
+          sample_type="Tumor"
+        fi
+        if [ "$sample_type" = "Normal" ]; then
+          sample_type="normal"
+        else
+          sample_type="tumor"
+        fi
+
+        # Ensure output folder exists
+        mkdir -p "$output_folder"
+
+        # Get input BAM files and format as JSON array
+        echo "Getting input BAM files and formatting as JSON array..."
+        input_bams_json="["
+        first=true
+        while IFS= read -r -d '' file; do
+          if [ "$first" = true ]; then
+            first=false
+          else
+            input_bams_json="$input_bams_json,"
+          fi
+          input_bams_json="$input_bams_json\"$file\""
+        done < <(find "$input_folder" -maxdepth 1 -type f -name "*.bam" -print0)
+        echo "Input BAM files: $input_bams_json"
+        input_bams_json="$input_bams_json]"
+
+        # Run Alignment
+        echo "================================================"
+        echo "🚀 STARTING ALIGNMENT"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "  - Input BAMs: $(echo "$input_bams_json" | jq -r 'length') files"
+        echo "⚙️  Configuration:"
+        echo "  - Sample Name: $sample_name"
+        echo "  - Sample Type: $sample_type"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        ALIGNMENT_START_TIME=$(date +%s)
+        
+        # Define miniwdl input JSON
+        cat <<EOF > /scratch/inputs.json
+        {
+          "align_all_bams.patient": "$sample_name",
+          "align_all_bams.bam_files": $input_bams_json,
+          "align_all_bams.ref_fasta": "$LOCAL_REF_FASTA",
+          "align_all_bams.ref_fasta_index": "$LOCAL_REF_INDEX"
+        }
+        EOF
+
+        # Run miniwdl and capture exit code, but don't exit on failure
+        echo "Running miniwdl..."
+        set +e
+        miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/alignment.wdl" \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/inputs.json 2>/dev/null
+
+        MINIWDL_EXIT_CODE=$?
+        set -e
+
+        # Post-execution logging for Alignment
+        ALIGNMENT_END_TIME=$(date +%s)
+        ALIGNMENT_DURATION=$((ALIGNMENT_END_TIME - ALIGNMENT_START_TIME))
+        ALIGNMENT_DURATION_HOUR=$((ALIGNMENT_DURATION / 3600))
+        ALIGNMENT_DURATION_MIN=$(((ALIGNMENT_DURATION % 3600) / 60))
+        ALIGNMENT_DURATION_SEC=$((ALIGNMENT_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ ALIGNMENT COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${ALIGNMENT_DURATION_HOUR}h ${ALIGNMENT_DURATION_MIN}m ${ALIGNMENT_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Aligned BAM: ${sample_name}.aligned.bam"
+        echo "  - BAM Index: ${sample_name}.aligned.bam.bai"
+        echo "================================================"
+
+        # Copy udocker cache to output folder
+        if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
+          echo "Copying udocker cache to resources folder..."
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"
+          cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
+        fi
+
+        # Process all files and values in outputs.json
+        echo "Processing all files and values in outputs.json..."
+        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "$sample_name" 
+
+        if [ $MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "MiniWDL run failed with exit code $MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $MINIWDL_EXIT_CODE
+        fi
+
+        echo "*************************"
+        echo "Alignment completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"

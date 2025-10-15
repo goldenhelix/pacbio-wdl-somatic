@@ -1,0 +1,415 @@
+name: DeepSomatic
+description: Call variants from PacBio HiFi aligned BAM using DeepSomatic.
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 48
+  memory_gb: 96
+
+parameters:
+  - name: tumor_sample_name
+    label: Sample Name (tumor)
+    type: string
+
+  - name: tumor_aligned_bam
+    label: Tumor Aligned BAM
+    type: file
+    pattern_match:
+      - '*.bam'
+    
+  - name: normal_aligned_bam
+    label: Normal Aligned BAM (Optional)
+    type: file
+    pattern_match:
+      - '*.bam'
+    optional: true
+
+  - name: normal_sample_name
+    label: Normal Sample Name (Optional)
+    type: string
+    optional: true
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+  
+  - name: cache_udocker_images
+    label: Cache Udocker Image
+    type: boolean
+    value: true
+
+steps:
+  - name: deepsomatic
+    type: cmd
+    description: Call variants from PacBio HiFi aligned BAM using DeepSomatic.
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting DeepSomatic Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - tumor_sample_name: $tumor_sample_name"
+        echo "  - tumor_aligned_bam: $tumor_aligned_bam"
+        echo "  - normal_aligned_bam: $normal_aligned_bam"
+        echo "  - normal_sample_name: $normal_sample_name"
+        echo "  - output_folder: $output_folder"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+        
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up resources path based on resources_path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
+
+        # set up env variables for miniwdl
+        export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
+        export MINIWDL__FILE_IO__ALLOW_ANY_INPUT=true
+        export MINIWDL__SCHEDULER__TASK_CONCURRENCY=8
+        export UDOCKER_DIR=/scratch/.udocker
+        
+        # Set up reference files
+        REF_FASTA="$PB_RESOURCES_DIR/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta"
+        REF_INDEX="$PB_RESOURCES_DIR/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta.fai"
+
+        # Verify reference files exist
+        if [ ! -f "$REF_FASTA" ]; then
+          echo "Error: Reference FASTA file not found at $REF_FASTA"
+          exit 1
+        fi
+        
+        if [ ! -f "$REF_INDEX" ]; then
+          echo "Error: Reference FASTA index file not found at $REF_INDEX"
+          exit 1
+        fi
+
+        # Copy reference files to /scratch
+        cp "$REF_FASTA" /scratch/
+        cp "$REF_INDEX" /scratch/
+        LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
+        LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
+
+        # Pull udocker layers from cache if requested
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ] && [ "$cache_udocker_images" = true ]; then
+          echo "Pulling udocker image from cache..."
+          mkdir -p /scratch/.udocker
+          cp -R "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"/* /scratch/.udocker/ || \
+            { echo "Failed to copy udocker cache to /scratch/.udocker; will pull layers instead"; }
+        fi
+        
+
+        # Check if normal sample parameters are provided
+        NORMAL_SAMPLE_PROVIDED=false
+        if [ -n "$normal_sample_name" ] && [ -n "$normal_aligned_bam" ]; then
+          NORMAL_SAMPLE_PROVIDED=true
+          
+          # Check if normal sample name matches the matched normal sample in sample catalog
+          CATALOG_NORMAL_SAMPLE=$(gautil client catalog-export SampleCatalog Sample:eq:"$tumor_sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')
+          
+          if [ -n "$CATALOG_NORMAL_SAMPLE" ]; then
+            if [ "$normal_sample_name" != "$CATALOG_NORMAL_SAMPLE" ]; then
+              echo "Warning: Normal sample name '$normal_sample_name' does not match the matched normal sample '$CATALOG_NORMAL_SAMPLE' in the sample catalog for tumor sample '$tumor_sample_name'"
+            fi
+          fi
+        elif [ -n "$normal_sample_name" ] || [ -n "$normal_aligned_bam" ]; then
+          echo "Warning: Only one of normal sample name or normal BAM file is provided. Normal sample will be ignored."
+        fi
+
+        # Find BAM index files
+        TUMOR_BAM_INDEX="${tumor_aligned_bam}.bai"
+
+        if [ ! -f "$TUMOR_BAM_INDEX" ]; then
+          echo "Error: Tumor BAM index file not found at $TUMOR_BAM_INDEX"
+          exit 1
+        fi
+
+        # Copy tumor BAM files to /scratch
+        cp "$tumor_aligned_bam" /scratch/
+        cp "$TUMOR_BAM_INDEX" /scratch/
+        LOCAL_TUMOR_BAM="/scratch/$(basename "$tumor_aligned_bam")"
+        LOCAL_TUMOR_BAM_INDEX="/scratch/$(basename "$TUMOR_BAM_INDEX")"
+
+        # Handle normal BAM files if provided
+        LOCAL_NORMAL_BAM=""
+        LOCAL_NORMAL_BAM_INDEX=""
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          NORMAL_BAM_INDEX="${normal_aligned_bam}.bai"
+          
+          if [ ! -f "$NORMAL_BAM_INDEX" ]; then
+            echo "Error: Normal BAM index file not found at $NORMAL_BAM_INDEX"
+            exit 1
+          fi
+
+          cp "$normal_aligned_bam" /scratch/
+          cp "$NORMAL_BAM_INDEX" /scratch/
+          LOCAL_NORMAL_BAM="/scratch/$(basename "$normal_aligned_bam")"
+          LOCAL_NORMAL_BAM_INDEX="/scratch/$(basename "$NORMAL_BAM_INDEX")"
+        fi
+
+        # Run split_contigs
+        echo "================================================"
+        echo "🚀 STARTING SPLIT CONTIGS ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Chunk Size: 75,000,000"
+        echo "  - Threads: 2"
+        echo "================================================"
+        
+        # Record start time
+        SPLIT_START_TIME=$(date +%s)
+        
+        cat <<EOF > /scratch/inputs_split_contigs.json
+        {
+          "split_contigs.ref_fasta_index": "$LOCAL_REF_INDEX",
+          "split_contigs.chunk_size": 75000000,
+          "split_contigs.threads": 2
+        }
+        EOF
+        
+        # Capture miniwdl output and extract contigs array
+        MINIWDL_OUTPUT=$(miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
+          --task split_contigs \
+          --dir /scratch \
+          --runtime-cpu-max=2 \
+          --runtime-memory-max=4G \
+          -i /scratch/inputs_split_contigs.json 2>/dev/null)
+        
+        # Post-execution logging for Split Contigs
+        SPLIT_END_TIME=$(date +%s)
+        SPLIT_DURATION=$((SPLIT_END_TIME - SPLIT_START_TIME))
+        SPLIT_DURATION_HOUR=$((SPLIT_DURATION / 3600))
+        SPLIT_DURATION_MIN=$(((SPLIT_DURATION % 3600) / 60))
+        SPLIT_DURATION_SEC=$((SPLIT_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ SPLIT CONTIGS ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${SPLIT_DURATION_HOUR}h ${SPLIT_DURATION_MIN}m ${SPLIT_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Contigs split into chunks"
+        echo "================================================"
+        
+        # Extract contigs array from miniwdl output using jq
+        CONTIGS_SPLIT_JSON=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."split_contigs.contigs"')
+
+        # Run deepsomatic
+
+        # Create inputs JSON file using jq to properly handle the contigs array
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          # Include normal sample parameters
+          jq -n \
+            --arg tumor_bam "$LOCAL_TUMOR_BAM" \
+            --arg tumor_bam_index "$LOCAL_TUMOR_BAM_INDEX" \
+            --arg normal_bam "$LOCAL_NORMAL_BAM" \
+            --arg normal_bam_index "$LOCAL_NORMAL_BAM_INDEX" \
+            --arg ref_fasta "$LOCAL_REF_FASTA" \
+            --arg ref_fasta_index "$LOCAL_REF_INDEX" \
+            --argjson contigs "$CONTIGS_SPLIT_JSON" \
+            --argjson threads "$AGENT_CPU_CORES" \
+            --arg tumor_pname "$tumor_sample_name" \
+            --arg normal_pname "$normal_sample_name" \
+            '{
+              "run_deepsomatic.tumor_bam": $tumor_bam,
+              "run_deepsomatic.tumor_bam_index": $tumor_bam_index,
+              "run_deepsomatic.normal_bam": $normal_bam,
+              "run_deepsomatic.normal_bam_index": $normal_bam_index,
+              "run_deepsomatic.ref_fasta": $ref_fasta,
+              "run_deepsomatic.ref_fasta_index": $ref_fasta_index,
+              "run_deepsomatic.contigs": $contigs,
+              "run_deepsomatic.threads": $threads,
+              "run_deepsomatic.tumor_pname": $tumor_pname,
+              "run_deepsomatic.normal_pname": $normal_pname
+            }' > /scratch/inputs_deepsomatic.json
+        else
+          # Exclude normal sample parameters
+          jq -n \
+            --arg tumor_bam "$LOCAL_TUMOR_BAM" \
+            --arg tumor_bam_index "$LOCAL_TUMOR_BAM_INDEX" \
+            --arg ref_fasta "$LOCAL_REF_FASTA" \
+            --arg ref_fasta_index "$LOCAL_REF_INDEX" \
+            --argjson contigs "$CONTIGS_SPLIT_JSON" \
+            --argjson threads "$AGENT_CPU_CORES" \
+            --arg tumor_pname "$tumor_sample_name" \
+            '{
+              "run_deepsomatic.tumor_bam": $tumor_bam,
+              "run_deepsomatic.tumor_bam_index": $tumor_bam_index,
+              "run_deepsomatic.ref_fasta": $ref_fasta,
+              "run_deepsomatic.ref_fasta_index": $ref_fasta_index,
+              "run_deepsomatic.contigs": $contigs,
+              "run_deepsomatic.threads": $threads,
+              "run_deepsomatic.tumor_pname": $tumor_pname
+            }' > /scratch/inputs_deepsomatic.json
+        fi
+        # Run deepsomatic
+        echo "================================================"
+        echo "🚀 STARTING DEEPSOMATIC ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_BAM") ($(format_file_size "$LOCAL_TUMOR_BAM" "GB") GB)"
+        echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX" "MB") MB)"
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
+          echo "  - Normal BAM Index: $(basename "$LOCAL_NORMAL_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_BAM_INDEX" "MB") MB)"
+        fi
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Tumor Sample: $tumor_sample_name"
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          echo "  - Normal Sample: $normal_sample_name"
+        fi
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        DEEPSOMATIC_START_TIME=$(date +%s)
+        
+        # Run miniwdl
+        set +e
+        MINIWDL_OUTPUT=$(miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/deepsomatic.wdl" \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/inputs_deepsomatic.json 2>/dev/null)
+        MINIWDL_EXIT_CODE=$?
+        set -e
+
+        if [ $MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "MiniWDL run failed with exit code $MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $MINIWDL_EXIT_CODE
+        fi
+
+        # Post-execution logging for DeepSomatic
+        DEEPSOMATIC_END_TIME=$(date +%s)
+        DEEPSOMATIC_DURATION=$((DEEPSOMATIC_END_TIME - DEEPSOMATIC_START_TIME))
+        DEEPSOMATIC_DURATION_HOUR=$((DEEPSOMATIC_DURATION / 3600))
+        DEEPSOMATIC_DURATION_MIN=$(((DEEPSOMATIC_DURATION % 3600) / 60))
+        DEEPSOMATIC_DURATION_SEC=$((DEEPSOMATIC_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ DEEPSOMATIC ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${DEEPSOMATIC_DURATION_HOUR}h ${DEEPSOMATIC_DURATION_MIN}m ${DEEPSOMATIC_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - DeepSomatic VCF: ${tumor_sample_name}.deepsomatic.vcf.gz"
+        echo "================================================"
+
+        # Extract the deepsomatic VCF path from miniwdl output
+        LOCAL_DEEPSOMATIC_VCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.deepsomatic_vcf"')
+
+        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" 
+
+        # Run mutational pattern analysis
+        echo "================================================"
+        echo "🚀 STARTING MUTATIONAL PATTERN ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Sample: $tumor_sample_name"
+        echo "  - Max Delta: 0.004"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        MUTATIONAL_START_TIME=$(date +%s)
+        
+        cat <<EOF > /scratch/inputs_mutationalpattern.json
+        { 
+          "mutationalpattern.vcf": "$LOCAL_DEEPSOMATIC_VCF",
+          "mutationalpattern.pname": "$tumor_sample_name",
+          "mutationalpattern.max_delta": 0.004,
+          "mutationalpattern.threads": $AGENT_CPU_CORES
+        }
+        EOF
+
+        # Run miniwdl
+        set +e
+        miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
+          --task mutationalpattern \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/inputs_mutationalpattern.json 2>/dev/null
+        MINIWDL_EXIT_CODE=$?
+        set -e
+
+        if [ $MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "MiniWDL run failed with exit code $MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $MINIWDL_EXIT_CODE
+        fi
+
+        # Post-execution logging for Mutational Pattern
+        MUTATIONAL_END_TIME=$(date +%s)
+        MUTATIONAL_DURATION=$((MUTATIONAL_END_TIME - MUTATIONAL_START_TIME))
+        MUTATIONAL_DURATION_HOUR=$((MUTATIONAL_DURATION / 3600))
+        MUTATIONAL_DURATION_MIN=$(((MUTATIONAL_DURATION % 3600) / 60))
+        MUTATIONAL_DURATION_SEC=$((MUTATIONAL_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ MUTATIONAL PATTERN ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${MUTATIONAL_DURATION_HOUR}h ${MUTATIONAL_DURATION_MIN}m ${MUTATIONAL_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Mutational pattern analysis completed"
+        echo "================================================"
+
+        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" 
+
+        # Copy udocker cache to output folder
+        if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"
+          cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
+        fi
+
+        echo "*************************"
+        echo "DeepSomatic completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"

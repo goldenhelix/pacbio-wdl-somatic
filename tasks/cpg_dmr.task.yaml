@@ -1,0 +1,486 @@
+name: CpG Pileup and DMR Analysis
+description: Generate CpG methylation scores and perform differential methylation analysis
+
+agent_requirements: 
+  cpu_cores: 32
+  memory_gb: 64
+
+parameters:
+  - name: tumor_sample_name
+    label: Sample Name (tumor)
+    type: string
+    help: "The name of the tumor sample with BAMs and VCFs to be phased."
+
+  - name: normal_sample_name
+    label: Sample Name (normal)
+    type: string
+    optional: true
+    help: "The name of the normal sample with VCFs to be phased (note that only a tumor BAM is phased). If not provided, the workflow will run in tumor-only mode."
+
+  - name: input_folder
+    label: Input Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The folder containing the input files."
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: cache_udocker_images
+    label: Cache Udocker Image
+    type: boolean
+    value: true
+    
+steps:
+  - name: cpg_dmr
+    type: cmd
+    description: Generate CpG methylation scores and perform differential methylation analysis
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting CpG Pileup and DMR Analysis Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - tumor_sample_name: $tumor_sample_name"
+        echo "  - normal_sample_name: $normal_sample_name"
+        echo "  - input_folder: $input_folder"
+        echo "  - output_folder: $output_folder"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+        
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+        
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up resource path
+        PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
+        
+        # Set up environment variables for miniwdl
+        export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
+        export MINIWDL__FILE_IO__ALLOW_ANY_INPUT=true
+        export MINIWDL__SCHEDULER__TASK_CONCURRENCY=8
+        export UDOCKER_DIR=/scratch/.udocker
+        
+        # Pull udocker layers from cache if requested
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ] && [ "$cache_udocker_images" = true ]; then
+          echo "Pulling udocker image from cache..."
+          mkdir -p /scratch/.udocker
+          cp -R "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"/* /scratch/.udocker/ || \
+            { echo "Failed to copy udocker cache to /scratch/.udocker; will pull layers instead"; }
+        fi
+
+        # Get reference files
+        REF_FASTA="${PB_RESOURCES_DIR}/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta"
+        REF_INDEX="${PB_RESOURCES_DIR}/GCA_000001405.15_GRCh38_no_alt_analysis_set_maskedGRC_exclusions_v2.fasta.fai"
+
+        # Get input files (infer hiphase BAMs from sample names)
+        TUMOR_PHASED_BAM="${input_folder}/${tumor_sample_name}.hiphase.bam"
+        TUMOR_PHASED_BAM_INDEX="${input_folder}/${tumor_sample_name}.hiphase.bam.bai"
+        if [ -z "${normal_sample_name}" ]; then
+          echo "Warning: Normal sample name not provided - running tumor-only analysis"
+        else
+          NORMAL_PHASED_BAM="${input_folder}/${normal_sample_name}.hiphase.bam"
+          NORMAL_PHASED_BAM_INDEX="${input_folder}/${normal_sample_name}.hiphase.bam.bai"
+        fi
+
+        # Verify inputs
+        if [ ! -f "$TUMOR_PHASED_BAM" ]; then
+          echo "Error: Tumor phased BAM file not found at $TUMOR_PHASED_BAM"
+          exit 1
+        fi
+        if [ ! -f "$TUMOR_PHASED_BAM_INDEX" ]; then
+          echo "Error: Tumor phased BAM index file not found at $TUMOR_PHASED_BAM_INDEX"
+          exit 1
+        fi
+        if [ -n "$normal_sample_name" ]; then
+          if [ ! -f "$NORMAL_PHASED_BAM" ]; then
+            echo "Error: Normal phased BAM file not found at $NORMAL_PHASED_BAM"
+            exit 1
+          fi
+          if [ ! -f "$NORMAL_PHASED_BAM_INDEX" ]; then
+            echo "Error: Normal phased BAM index file not found at $NORMAL_PHASED_BAM_INDEX"
+            exit 1
+          fi
+        fi
+
+        # copy reference files to /scratch
+        cp "$REF_FASTA" /scratch/
+        cp "$REF_INDEX" /scratch/
+        LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
+        LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
+
+        # Copy input files to /scratch
+        cp "$TUMOR_PHASED_BAM" /scratch/
+        cp "$TUMOR_PHASED_BAM_INDEX" /scratch/
+        LOCAL_TUMOR_PHASED_BAM="/scratch/$(basename "$TUMOR_PHASED_BAM")"
+        LOCAL_TUMOR_PHASED_BAM_INDEX="/scratch/$(basename "$TUMOR_PHASED_BAM_INDEX")"
+        if [ -n "$normal_sample_name" ]; then
+          cp "$NORMAL_PHASED_BAM" /scratch/
+          cp "$NORMAL_PHASED_BAM_INDEX" /scratch/
+          LOCAL_NORMAL_PHASED_BAM="/scratch/$(basename "$NORMAL_PHASED_BAM")"
+          LOCAL_NORMAL_PHASED_BAM_INDEX="/scratch/$(basename "$NORMAL_PHASED_BAM_INDEX")"
+        fi
+
+        # Check if pb-CpG-tools is already cached, otherwise download and extract
+        cd /scratch
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/pb_cpg_tools_cache/pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu" ] && [ "$cache_udocker_images" = true ]; then
+          cp -r "${WORKSPACE_DIR}/${RESOURCES_PATH}/pb_cpg_tools_cache/pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu" /scratch/
+        else
+          curl -L -O https://github.com/PacificBiosciences/pb-CpG-tools/releases/download/v3.0.0/pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu.tar.gz
+        fi
+        CPG_BIN="/scratch/pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu/bin/aligned_bam_to_cpg_scores"
+        chmod +x "$CPG_BIN"
+
+        # Verify CpG binary
+        "$CPG_BIN" --help > /dev/null || { 
+          echo "Error: pb-CpG-tools binary not found"
+          exit 1
+        }
+
+        # Run CpG pileup for tumor sample
+        echo "================================================"
+        echo "🚀 STARTING CPG PILEUP ANALYSIS (TUMOR)"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_PHASED_BAM") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM" "GB") GB)"
+        echo "  - BAM Index: $(basename "$LOCAL_TUMOR_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM_INDEX" "MB") MB)"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "⚙️  Configuration:"
+        echo "  - Sample: $tumor_sample_name"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Min Coverage: 5"
+        echo "  - Min MapQ: 1"
+        echo "================================================"
+        
+        # Record start time
+        CPG_TUMOR_START_TIME=$(date +%s)
+        
+        set +e
+        "$CPG_BIN" \
+          --bam "$LOCAL_TUMOR_PHASED_BAM" \
+          --output-prefix "$tumor_sample_name" \
+          --ref "$LOCAL_REF_FASTA" \
+          --threads $AGENT_CPU_CORES \
+          --min-coverage 5 \
+          --min-mapq 1 2>/dev/null
+        CPG_EXIT_CODE=$?
+        set -e
+
+        if [ $CPG_EXIT_CODE -ne 0 ]; then
+          echo "CpG pileup failed with exit code $CPG_EXIT_CODE"
+          exit $CPG_EXIT_CODE
+        fi
+
+        # Post-execution logging for Tumor CpG
+        CPG_TUMOR_END_TIME=$(date +%s)
+        CPG_TUMOR_DURATION=$((CPG_TUMOR_END_TIME - CPG_TUMOR_START_TIME))
+        CPG_TUMOR_DURATION_HOUR=$((CPG_TUMOR_DURATION / 3600))
+        CPG_TUMOR_DURATION_MIN=$(((CPG_TUMOR_DURATION % 3600) / 60))
+        CPG_TUMOR_DURATION_SEC=$((CPG_TUMOR_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ CPG PILEUP ANALYSIS (TUMOR) COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${CPG_TUMOR_DURATION_HOUR}h ${CPG_TUMOR_DURATION_MIN}m ${CPG_TUMOR_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        if [ -f "${tumor_sample_name}.combined.bed.gz" ]; then
+          echo "  - Combined BED: $(basename "${tumor_sample_name}.combined.bed.gz") ($(format_file_size "${tumor_sample_name}.combined.bed.gz" "MB") MB)"
+        fi
+        if [ -f "${tumor_sample_name}.combined.bw" ]; then
+          echo "  - Combined BW: $(basename "${tumor_sample_name}.combined.bw") ($(format_file_size "${tumor_sample_name}.combined.bw" "MB") MB)"
+        fi
+        if [ -f "${tumor_sample_name}.hap1.bed.gz" ]; then
+          echo "  - Hap1 BED: $(basename "${tumor_sample_name}.hap1.bed.gz") ($(format_file_size "${tumor_sample_name}.hap1.bed.gz" "MB") MB)"
+        fi
+        if [ -f "${tumor_sample_name}.hap2.bed.gz" ]; then
+          echo "  - Hap2 BED: $(basename "${tumor_sample_name}.hap2.bed.gz") ($(format_file_size "${tumor_sample_name}.hap2.bed.gz" "MB") MB)"
+        fi
+        echo "================================================"
+        
+        # Run CpG pileup for normal sample if provided
+        if [ -n "$normal_sample_name" ]; then
+          echo "================================================"
+          echo "🚀 STARTING CPG PILEUP ANALYSIS (NORMAL)"
+          echo "================================================"
+          echo "📅 Server Time: $(date)"
+          echo "📁 Input Files:"
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_PHASED_BAM") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM" "GB") GB)"
+          echo "  - BAM Index: $(basename "$LOCAL_NORMAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM_INDEX" "MB") MB)"
+          echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+          echo "⚙️  Configuration:"
+          echo "  - Sample: $normal_sample_name"
+          echo "  - Threads: $AGENT_CPU_CORES"
+          echo "  - Min Coverage: 5"
+          echo "  - Min MapQ: 1"
+          echo "================================================"
+          
+          # Record start time
+          CPG_NORMAL_START_TIME=$(date +%s)
+          
+          set +e
+          "$CPG_BIN" \
+            --bam "$LOCAL_NORMAL_PHASED_BAM" \
+            --output-prefix "$normal_sample_name" \
+            --ref "$LOCAL_REF_FASTA" \
+            --threads $AGENT_CPU_CORES \
+            --min-coverage 5 \
+            --min-mapq 1 2>/dev/null
+          CPG_NORMAL_EXIT_CODE=$?
+          set -e
+
+          if [ $CPG_NORMAL_EXIT_CODE -ne 0 ]; then
+            echo "CpG pileup for normal sample failed with exit code $CPG_NORMAL_EXIT_CODE"
+            exit $CPG_NORMAL_EXIT_CODE
+          fi
+
+          # Post-execution logging for Normal CpG
+          CPG_NORMAL_END_TIME=$(date +%s)
+          CPG_NORMAL_DURATION=$((CPG_NORMAL_END_TIME - CPG_NORMAL_START_TIME))
+          CPG_NORMAL_DURATION_HOUR=$((CPG_NORMAL_DURATION / 3600))
+          CPG_NORMAL_DURATION_MIN=$(((CPG_NORMAL_DURATION % 3600) / 60))
+          CPG_NORMAL_DURATION_SEC=$((CPG_NORMAL_DURATION % 60))
+          
+          echo "================================================"
+          echo "✅ CPG PILEUP ANALYSIS (NORMAL) COMPLETED SUCCESSFULLY"
+          echo "================================================"
+          echo "⏱️  Execution Time: ${CPG_NORMAL_DURATION_HOUR}h ${CPG_NORMAL_DURATION_MIN}m ${CPG_NORMAL_DURATION_SEC}s"
+          echo "📁 Output Files:"
+          if [ -f "${normal_sample_name}.combined.bed.gz" ]; then
+            echo "  - Combined BED: $(basename "${normal_sample_name}.combined.bed.gz") ($(format_file_size "${normal_sample_name}.combined.bed.gz" "MB") MB)"
+          fi
+          if [ -f "${normal_sample_name}.combined.bw" ]; then
+            echo "  - Combined BW: $(basename "${normal_sample_name}.combined.bw") ($(format_file_size "${normal_sample_name}.combined.bw" "MB") MB)"
+          fi
+          if [ -f "${normal_sample_name}.hap1.bed.gz" ]; then
+            echo "  - Hap1 BED: $(basename "${normal_sample_name}.hap1.bed.gz") ($(format_file_size "${normal_sample_name}.hap1.bed.gz" "MB") MB)"
+          fi
+          if [ -f "${normal_sample_name}.hap2.bed.gz" ]; then
+            echo "  - Hap2 BED: $(basename "${normal_sample_name}.hap2.bed.gz") ($(format_file_size "${normal_sample_name}.hap2.bed.gz" "MB") MB)"
+          fi
+          echo "================================================"
+        fi
+
+        # Copy output files to output folder
+        # Copy tumor CpG output files
+        cp "${tumor_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        
+        # Copy normal CpG output files if available
+        if [ -n "$normal_sample_name" ]; then
+          cp "${normal_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        fi
+        
+        # Copy output files to output folder
+        echo "Copying CpG outputs..."
+        # Copy tumor CpG output files
+        cp "${tumor_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
+        cp "${tumor_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        
+        # Copy normal CpG output files if available
+        if [ -n "$normal_sample_name" ]; then
+          cp "${normal_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
+          cp "${normal_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        fi
+        
+        # Run DMR analysis
+        echo "================================================"
+        echo "🚀 STARTING DMR ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor DSS BED: ${tumor_sample_name}.dss.bed.gz"
+        echo "  - Normal DSS BED: ${normal_sample_name}.dss.bed.gz"
+        echo "⚙️  Configuration:"
+        echo "  - Sample: $tumor_sample_name"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        DMR_START_TIME=$(date +%s)
+        
+        # Pre-process bed files to remove headers (pb-CpG-tools adds headers starting with ##)
+        if [ -f "${tumor_sample_name}.combined.bed.gz" ]; then
+          gunzip -c "${tumor_sample_name}.combined.bed.gz" | grep -v "^##" | gzip > "${tumor_sample_name}.combined.noheader.bed.gz"
+        fi
+        
+        if [ -f "${normal_sample_name}.combined.bed.gz" ]; then
+          gunzip -c "${normal_sample_name}.combined.bed.gz" | grep -v "^##" | gzip > "${normal_sample_name}.combined.noheader.bed.gz"
+        fi
+        
+        # Convert pb-CpG-tools v3.0.0 format to DSS format
+        # pb-CpG-tools v3.0.0 output: #chrom, begin, end, mod_score, type, cov, est_mod_count, est_unmod_count, discretized_mod_score
+        # DSS format needs: chr, pos, N (total cov), X (methylated counts)
+        # DSS_DMR task expects columns 1,2,6,7, so we use the correct columns
+        
+        if [ -f "${tumor_sample_name}.combined.noheader.bed.gz" ]; then
+          gunzip -c "${tumor_sample_name}.combined.noheader.bed.gz" | \
+          awk 'NR==1 {next} 
+               {
+                 chr=$1; gsub(/^chr/, "", chr)
+                 pos=$2
+                 cov=$6    # total coverage
+                 mod_count=$7  # methylated count
+                 
+                 # Validate data: mod_count should not exceed cov
+                 # If it does, cap mod_count to cov
+                 if (mod_count > cov) {
+                   mod_count = cov
+                 }
+                 
+                 print chr "\t" pos "\t0\t0\t0\t" cov "\t" mod_count
+               }' | \
+          gzip > "${tumor_sample_name}.dss.bed.gz"
+        fi
+        
+        if [ -f "${normal_sample_name}.combined.noheader.bed.gz" ]; then
+          gunzip -c "${normal_sample_name}.combined.noheader.bed.gz" | \
+          awk 'NR==1 {next} 
+               {
+                 chr=$1; gsub(/^chr/, "", chr)
+                 pos=$2
+                 cov=$6    # total coverage  
+                 mod_count=$7  # methylated count
+                 
+                 # Validate data: mod_count should not exceed cov
+                 # If it does, cap mod_count to cov
+                 if (mod_count > cov) {
+                   mod_count = cov
+                 }
+                 
+                 print chr "\t" pos "\t0\t0\t0\t" cov "\t" mod_count
+               }' | \
+          gzip > "${normal_sample_name}.dss.bed.gz"
+        fi
+
+        # Create DSS_DMR inputs JSON
+        jq -n \
+          --arg tumor_bed "${tumor_sample_name}.dss.bed.gz" \
+          --arg normal_bed "${normal_sample_name}.dss.bed.gz" \
+          --arg pname "${tumor_sample_name}" \
+          --argjson threads ${AGENT_CPU_CORES} \
+          '{
+            "DSS_DMR.tumor_bed": $tumor_bed,
+            "DSS_DMR.normal_bed": $normal_bed,
+            "DSS_DMR.pname": $pname,
+            "DSS_DMR.threads": $threads
+          }' > /scratch/DSS_DMR_inputs.json
+        
+        set +e
+        DMR_OUTPUT=$(miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/basemod.wdl" \
+          --task DSS_DMR \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/DSS_DMR_inputs.json 2>/dev/null)
+        DMR_EXIT_CODE=$?
+        set -e
+
+        if [ $DMR_EXIT_CODE -ne 0 ]; then
+          echo "DMR failed with exit code $DMR_EXIT_CODE"
+          handle_miniwdl_failure $DMR_EXIT_CODE
+        fi
+
+        # Post-execution logging for DMR
+        DMR_END_TIME=$(date +%s)
+        DMR_DURATION=$((DMR_END_TIME - DMR_START_TIME))
+        DMR_DURATION_HOUR=$((DMR_DURATION / 3600))
+        DMR_DURATION_MIN=$(((DMR_DURATION % 3600) / 60))
+        DMR_DURATION_SEC=$((DMR_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ DMR ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${DMR_DURATION_HOUR}h ${DMR_DURATION_MIN}m ${DMR_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        
+        # Extract and report output file sizes
+        echo "$DMR_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            file_size_kb=$(format_file_size "$output_file" "KB")
+            echo "  - $(basename "$output_file") ($file_size_kb KB)"
+          fi
+        done
+        echo "================================================"
+        
+        # Copy udocker cache after DSS_DMR
+        if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"
+          cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
+        fi
+        
+        # Copy DMR results to output folder
+        echo "Copying DMR outputs..."
+        # Parse DMR output to get the generated file path
+        DMR_FILE=$(echo "$DMR_OUTPUT" | jq -r '.outputs["DSS_DMR.output_DMR"]')
+        cp "$DMR_FILE" "$output_folder/" 2>/dev/null || true
+        
+        # Copy pb-CpG-tools binary to cache for future use
+        if [ "$cache_udocker_images" = true ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/pb_cpg_tools_cache"
+          cp -r /scratch/pb-CpG-tools-v3.0.0-x86_64-unknown-linux-gnu "${WORKSPACE_DIR}/${RESOURCES_PATH}/pb_cpg_tools_cache/" 2>/dev/null || true
+        fi
+        
+        echo "*************************"
+        echo "CpG DMR analysis completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"
+        

@@ -1,0 +1,184 @@
+name: mosdepth
+description: Run mosdepth to calculate depth of coverage for BAM.
+auto_generate_session_for_account: "{workspaceBot}"
+
+agent_requirements:
+  cpu_cores: 8
+  memory_gb: 8
+
+parameters:
+  - name: sample_name
+    label: Sample Name
+    type: string
+    help: "Sample/patient name"
+
+  - name: aligned_bam
+    label: Aligned BAM
+    type: file
+
+  - name: output_folder
+    label: Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+
+  - name: cache_udocker_images
+    label: Cache Udocker Image
+    type: boolean
+    value: true
+
+steps:
+  - name: mosdepth
+    type: cmd
+    description: Run mosdepth to calculate depth of coverage for BAM.
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        echo "*************************"
+        echo "Starting Mosdepth Task"
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "Input Parameters:"
+        echo "  - sample_name: $sample_name"
+        echo "  - aligned_bam: $aligned_bam"
+        echo "  - output_folder: $output_folder"
+        echo "  - cache_udocker_images: $cache_udocker_images"
+        echo "*************************"
+
+        # Function to format file sizes using shell arithmetic
+        format_file_size() {
+            local file_path="$1"
+            local unit="$2"  # "KB", "MB", or "GB"
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
+            
+            case "$unit" in
+                "KB")
+                    local size_kb=$((file_size / 1024))
+                    local remainder_bytes=$((file_size % 1024))
+                    local decimal_part=$((remainder_bytes * 100 / 1024))
+                    echo "${size_kb}.${decimal_part}"
+                    ;;
+                "MB")
+                    local size_mb=$((file_size / 1024 / 1024))
+                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
+                    local decimal_part=$((remainder_kb * 100 / 1024))
+                    echo "${size_mb}.${decimal_part}"
+                    ;;
+                "GB")
+                    local size_gb=$((file_size / 1024 / 1024 / 1024))
+                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
+                    local decimal_part=$((remainder_mb * 100 / 1024))
+                    echo "${size_gb}.${decimal_part}"
+                    ;;
+                *)
+                    echo "0.0"
+                    ;;
+            esac
+        }
+        
+        handle_miniwdl_failure() {
+          local exit_code=$1
+          echo "MiniWDL run failed with exit code $exit_code"
+          echo "Capturing debug information..."
+          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
+          exit $exit_code
+        }
+
+        # Set up env variables for miniwdl
+        export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
+        export MINIWDL__FILE_IO__ALLOW_ANY_INPUT=true
+        export MINIWDL__SCHEDULER__TASK_CONCURRENCY=8
+        export UDOCKER_DIR=/scratch/.udocker
+
+        # Pull udocker layers from cache if requested
+        if [ -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ] && [ "$cache_udocker_images" = true ]; then
+          echo "Pulling udocker image from cache..."
+          mkdir -p /scratch/.udocker
+          cp -R "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"/* /scratch/.udocker/ || \
+            { echo "Failed to copy udocker cache to /scratch/.udocker; will pull layers instead"; }
+        fi
+        
+        # Find BAM index file
+        BAM_INDEX="${aligned_bam}.bai"
+        if [ ! -f "$BAM_INDEX" ]; then
+          echo "Error: BAM index file not found at $BAM_INDEX"
+          echo "Please ensure the BAM file is indexed"
+          exit 1
+        fi
+
+        # Copy BAM files to /scratch
+        echo "Copying input files..."
+        cp "${aligned_bam}" /scratch/
+        cp "$BAM_INDEX" /scratch/
+        LOCAL_BAM="/scratch/$(basename "${aligned_bam}")"
+        LOCAL_BAM_INDEX="/scratch/$(basename "${BAM_INDEX}")"
+
+        # Run Mosdepth analysis
+        echo "================================================"
+        echo "🚀 STARTING MOSDEPTH ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Aligned BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM" "GB") GB)"
+        echo "  - BAM Index: $(basename "$LOCAL_BAM_INDEX") ($(format_file_size "$LOCAL_BAM_INDEX" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Sample: $sample_name"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "================================================"
+        
+        # Record start time
+        MOSDEPTH_START_TIME=$(date +%s)
+        
+        # Define minidwl input JSON
+        cat <<EOF > /scratch/inputs.json
+        {
+          "mosdepth.pname": "$sample_name",
+          "mosdepth.bam": "$LOCAL_BAM",
+          "mosdepth.bam_index": "$LOCAL_BAM_INDEX",
+          "mosdepth.threads": $AGENT_CPU_CORES
+        }
+        EOF
+
+        # Run miniwdl and capture exit code, but don't exit on failure
+        set +e
+        miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
+          --task mosdepth \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          -i /scratch/inputs.json 2>/dev/null
+
+        MINIWDL_EXIT_CODE=$?
+        set -e
+
+        if [ $MINIWDL_EXIT_CODE -ne 0 ]; then
+          echo "Mosdepth failed with exit code $MINIWDL_EXIT_CODE"
+          handle_miniwdl_failure $MINIWDL_EXIT_CODE
+        fi
+
+        # Post-execution logging for Mosdepth
+        MOSDEPTH_END_TIME=$(date +%s)
+        MOSDEPTH_DURATION=$((MOSDEPTH_END_TIME - MOSDEPTH_START_TIME))
+        MOSDEPTH_DURATION_HOUR=$((MOSDEPTH_DURATION / 3600))
+        MOSDEPTH_DURATION_MIN=$(((MOSDEPTH_DURATION % 3600) / 60))
+        MOSDEPTH_DURATION_SEC=$((MOSDEPTH_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ MOSDEPTH ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${MOSDEPTH_DURATION_HOUR}h ${MOSDEPTH_DURATION_MIN}m ${MOSDEPTH_DURATION_SEC}s"
+        echo "📁 Output Files:"
+        echo "  - Coverage depth analysis completed"
+        echo "================================================"
+
+        # Copy udocker cache to output folder
+        if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
+          mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}"
+          cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
+        fi
+
+        echo "*************************"
+        echo "Mosdepth completed successfully"
+        echo "Output files copied to: $output_folder"
+        echo "*************************"
+        
