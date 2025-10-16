@@ -180,15 +180,18 @@ steps:
         # Record start time
         ALIGNMENT_START_TIME=$(date +%s)
         
-        # Define miniwdl input JSON
-        cat <<EOF > /scratch/inputs.json
-        {
-          "align_all_bams.patient": "$sample_name",
-          "align_all_bams.bam_files": $input_bams_json,
-          "align_all_bams.ref_fasta": "$LOCAL_REF_FASTA",
-          "align_all_bams.ref_fasta_index": "$LOCAL_REF_INDEX"
-        }
-        EOF
+        # Generate alignment input JSON
+        jq -n \
+          --arg patient "$sample_name" \
+          --argjson bam_files "$input_bams_json" \
+          --arg ref_fasta "$LOCAL_REF_FASTA" \
+          --arg ref_fasta_index "$LOCAL_REF_INDEX" \
+          '{
+            "align_all_bams.patient": $patient,
+            "align_all_bams.bam_files": $bam_files,
+            "align_all_bams.ref_fasta": $ref_fasta,
+            "align_all_bams.ref_fasta_index": $ref_fasta_index
+          }' > /scratch/inputs.json
 
         # Run miniwdl and capture exit code, but don't exit on failure
         echo "Running miniwdl..."
