@@ -1,0 +1,45 @@
+name: Download PacBio Somatic WDL Reference Data Resources
+description: Download reference data bundle for PacBio Somatic WDL workflow
+
+agent_requirements:
+  cpu_cores: 4
+  memory_gb: 8
+
+parameters:
+  - name: target_directory
+    label: Base Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    optional: true
+    help: Defaults to the directory specified by RESOURCES_PATH in Workspace Settings
+    group: Advanced Options
+
+steps:
+- name: WDL task
+  type: cmd
+  description: Run the wdl workflow
+  args:
+      - |- # shell
+        set -eu pipefail
+
+        BASE_DIR="${target_directory}"
+        if [ -z "$BASE_DIR" ]; then 
+          BASE_DIR="$WORKSPACE_DIR/${RESOURCES_PATH}"
+        fi
+        mkdir -p "$BASE_DIR"
+        if [ ! -d "$BASE_DIR" ]; then
+          echo "The default resource path does not exist or is not a valid directory at $RESOURCES_PATH"
+          echo "Please update the RESOURCES_PATH in Workspace Settings to point to a valid directory that can be used to download the reference and then re-run this task"
+          exit 1
+        fi
+
+        echo "Starting PacBio Somatic WDL resources download..."
+        echo "Base directory: $BASE_DIR"
+
+        cd /scratch
+        curl --silent -L https://zenodo.org/record/17043964/files/hifisomatic_resources.tar.gz | tar --no-same-owner -m -xzf - -C "$BASE_DIR"
+
+        find "$BASE_DIR/hifisomatic_resources" -name "*.tsv" -type f -exec sed -i "s|<prefix>|${BASE_DIR}|g" {} \;
+        find "$BASE_DIR/hifisomatic_resources" -name "*.tsv" -type f -exec sed -i "s|\$WORKSPACE_DIR|${WORKSPACE_DIR}|g" {} \;
+        
+        echo "PacBio Somatic WDL resources downloaded and processed successfully"
