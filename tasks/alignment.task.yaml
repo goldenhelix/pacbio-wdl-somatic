@@ -47,44 +47,31 @@ steps:
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
 
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
+        
+        # Check for aligned BAM and index files
+        ALIGNED_BAM="${output_folder}/${sample_name}.aligned.bam"
+        ALIGNED_BAM_INDEX="${output_folder}/${sample_name}.aligned.bam.bai"
+        
+        if [ ! -f "$ALIGNED_BAM" ] || [ ! -f "$ALIGNED_BAM_INDEX" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Alignment output files missing"
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "*************************"
+          echo "Tumor/Normal Alignment Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
 
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up resources path based on resources_path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -168,8 +155,8 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
-        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX"))"
         echo "  - Input BAMs: $(echo "$input_bams_json" | jq -r 'length') files"
         echo "⚙️  Configuration:"
         echo "  - Sample Name: $sample_name"

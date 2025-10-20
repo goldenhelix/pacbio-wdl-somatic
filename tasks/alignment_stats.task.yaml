@@ -39,45 +39,45 @@ steps:
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
 
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
+        
+        # Extract sample name from phased_bam filename (remove path and .hiphase.bam extension)
+        SAMPLE_NAME=$(basename "$phased_bam" | sed 's/\.hiphase\.bam$//')
+        
+        # Check for SeqKit alignment stats files
+        ALIGNMENT_STATS="${output_folder}/${SAMPLE_NAME}.hiphase.alignment.stats.tsv.gz"
+        OVERALL_STATS="${output_folder}/${SAMPLE_NAME}.hiphase.overall.stats.tsv.gz"
+        
+        # Check for summary output files
+        SUMMARY_STATS="${output_folder}/${SAMPLE_NAME}.hiphase.alignment.stats.alignment.summary.tsv"
+        
+        if [ ! -f "$ALIGNMENT_STATS" ] || [ ! -f "$OVERALL_STATS" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - SeqKit alignment stats files missing"
+        fi
+        
+        if [ ! -f "$SUMMARY_STATS" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Summary stats file missing"
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "  - Alignment Stats: $(basename "$ALIGNMENT_STATS") ($(format_file_size "$ALIGNMENT_STATS"))"
+          echo "  - Overall Stats: $(basename "$OVERALL_STATS") ($(format_file_size "$OVERALL_STATS"))"
+          echo "  - Summary Stats: $(basename "$SUMMARY_STATS") ($(format_file_size "$SUMMARY_STATS"))"
+          echo "*************************"
+          echo "Alignment Statistics Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
 
-        # Function to handle miniwdl failure
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up resource path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -120,8 +120,8 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Phased BAM: $(basename "$LOCAL_PHASED_BAM") ($(format_file_size "$LOCAL_PHASED_BAM" "GB") GB)"
-        echo "  - BAM Index: $(basename "$LOCAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_PHASED_BAM_INDEX" "MB") MB)"
+        echo "  - Phased BAM: $(basename "$LOCAL_PHASED_BAM") ($(format_file_size "$LOCAL_PHASED_BAM"))"
+        echo "  - BAM Index: $(basename "$LOCAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_PHASED_BAM_INDEX"))"
         echo "⚙️  Configuration:"
         echo "  - Threads: $AGENT_CPU_CORES"
         echo "================================================"
@@ -174,8 +174,7 @@ steps:
         # Extract and report output file sizes
         echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
           if [ -f "$output_file" ]; then
-            file_size_mb=$(format_file_size "$output_file" "MB")
-            echo "  - $(basename "$output_file") ($file_size_mb MB)"
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
           fi
         done
         echo "================================================"
@@ -197,7 +196,7 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - SeqKit Alignment Stats: $(basename "$LOCAL_SEQKIT_ALIGNMENT_STATS") ($(format_file_size "$LOCAL_SEQKIT_ALIGNMENT_STATS" "KB") KB)"
+        echo "  - SeqKit Alignment Stats: $(basename "$LOCAL_SEQKIT_ALIGNMENT_STATS") ($(format_file_size "$LOCAL_SEQKIT_ALIGNMENT_STATS"))"
         echo "⚙️  Configuration:"
         echo "  - Threads: $AGENT_CPU_CORES"
         echo "================================================"
@@ -247,8 +246,7 @@ steps:
         # Extract and report output file sizes
         echo "$SUMMARY_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
           if [ -f "$output_file" ]; then
-            file_size_kb=$(format_file_size "$output_file" "KB")
-            echo "  - $(basename "$output_file") ($file_size_kb KB)"
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
           fi
         done
         echo "================================================"

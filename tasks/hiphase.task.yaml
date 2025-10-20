@@ -63,44 +63,52 @@ steps:
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
 
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
         
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Check for tumor HiPhase output files
+        TUMOR_PHASED_VCF="${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz"
+        TUMOR_PHASED_VCF_INDEX="${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz.tbi"
+        TUMOR_PHASED_BAM="${output_folder}/${tumor_sample_name}.hiphase.bam"
+        TUMOR_PHASED_BAM_INDEX="${output_folder}/${tumor_sample_name}.hiphase.bam.bai"
+        TUMOR_STATS_FILE="${output_folder}/${tumor_sample_name}.hiphase.stats.tsv"
+        TUMOR_BLOCKS_FILE="${output_folder}/${tumor_sample_name}.hiphase.blocks.tsv"
+        TUMOR_HAPLOTAGS_FILE="${output_folder}/${tumor_sample_name}.hiphase.haplotags.tsv.gz"
+        
+        # Check for normal HiPhase output files if normal sample is provided
+        if [ -n "$normal_sample_name" ]; then
+          NORMAL_PHASED_VCF="${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz"
+          NORMAL_PHASED_VCF_INDEX="${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz.tbi"
+          NORMAL_STATS_FILE="${output_folder}/${normal_sample_name}.hiphase.stats.tsv"
+          NORMAL_BLOCKS_FILE="${output_folder}/${normal_sample_name}.hiphase.blocks.tsv"
+          NORMAL_HAPLOTAGS_FILE="${output_folder}/${normal_sample_name}.hiphase.haplotags.tsv.gz"
+        fi
+        
+        if [ ! -f "$TUMOR_PHASED_VCF" ] || [ ! -f "$TUMOR_PHASED_VCF_INDEX" ] || [ ! -f "$TUMOR_PHASED_BAM" ] || [ ! -f "$TUMOR_PHASED_BAM_INDEX" ] || [ ! -f "$TUMOR_STATS_FILE" ] || [ ! -f "$TUMOR_BLOCKS_FILE" ] || [ ! -f "$TUMOR_HAPLOTAGS_FILE" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Tumor HiPhase output files missing"
+        fi
+        
+        if [ -n "$normal_sample_name" ]; then
+          if [ ! -f "$NORMAL_PHASED_VCF" ] || [ ! -f "$NORMAL_PHASED_VCF_INDEX" ] || [ ! -f "$NORMAL_STATS_FILE" ] || [ ! -f "$NORMAL_BLOCKS_FILE" ] || [ ! -f "$NORMAL_HAPLOTAGS_FILE" ]; then
+            OUTPUT_FILES_EXIST=false
+            echo "  - Normal HiPhase output files missing"
+          fi
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "*************************"
+          echo "Phasing with HiPhase Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
+
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up resource path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -165,7 +173,7 @@ steps:
 
         # Check for DeepSomatic VCF and index 
 
-        deepsomatic_vcf="${input_dir}/${tumor_sample_name}_deepsomatic.vcf.gz"
+        deepsomatic_vcf="${input_dir}/${tumor_sample_name}.deepsomatic.vcf.gz"
         deepsomatic_vcf_index="${deepsomatic_vcf}.tbi"
         if [ ! -f "$deepsomatic_vcf" ]; then
           echo "Error: DeepSomatic VCF file not found at $deepsomatic_vcf"
@@ -260,14 +268,14 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Tumor BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM" "GB") GB)"
-        echo "  - Clair3 VCF: $(basename "$LOCAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_CLAIR3_VCF" "MB") MB)"
-        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF" "MB") MB)"
+        echo "  - Tumor BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM"))"
+        echo "  - Clair3 VCF: $(basename "$LOCAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_CLAIR3_VCF"))"
+        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF"))"
         if [ -n "$normal_sample_name" ]; then
-          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
-          echo "  - Normal Clair3 VCF: $(basename "$LOCAL_NORMAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_NORMAL_CLAIR3_VCF" "MB") MB)"
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM"))"
+          echo "  - Normal Clair3 VCF: $(basename "$LOCAL_NORMAL_CLAIR3_VCF") ($(format_file_size "$LOCAL_NORMAL_CLAIR3_VCF"))"
         fi
-        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
         echo "⚙️  Configuration:"
         echo "  - Tumor Sample: $tumor_sample_name"
         if [ -n "$normal_sample_name" ]; then

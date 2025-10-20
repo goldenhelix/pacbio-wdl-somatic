@@ -59,44 +59,80 @@ steps:
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
 
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
+
+        # Check if normal sample parameters are provided
+        NORMAL_SAMPLE_PROVIDED=false
+        if [ -n "$normal_sample_name" ] && [ -n "$normal_aligned_bam" ]; then
+          NORMAL_SAMPLE_PROVIDED=true
+          
+          # Check if normal sample name matches the matched normal sample in sample catalog
+          CATALOG_NORMAL_SAMPLE=$(gautil client catalog-export SampleCatalog Sample:eq:"$tumor_sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')
+          
+          if [ -n "$CATALOG_NORMAL_SAMPLE" ]; then
+            if [ "$normal_sample_name" != "$CATALOG_NORMAL_SAMPLE" ]; then
+              echo "Warning: Normal sample name '$normal_sample_name' does not match the matched normal sample '$CATALOG_NORMAL_SAMPLE' in the sample catalog for tumor sample '$tumor_sample_name'"
+            fi
+          fi
+        elif [ -n "$normal_sample_name" ] || [ -n "$normal_aligned_bam" ]; then
+          echo "Warning: Only one of normal sample name or normal BAM file is provided. Normal sample will be ignored."
+        fi
         
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Check for DeepSomatic output files with standardized naming
+        DEEPSOMATIC_VCF_FILES=$(find "$output_folder" -name "${tumor_sample_name}.deepsomatic.vcf.gz" 2>/dev/null | wc -l)
+        DEEPSOMATIC_GVCF_FILES=$(find "$output_folder" -name "${tumor_sample_name}.deepsomatic.g.vcf.gz" 2>/dev/null | wc -l)
+        CLAIR3_TUMOR_VCF_FILES=$(find "$output_folder" -name "${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz" 2>/dev/null | wc -l)
+        
+        # Check for normal Clair3 VCF files if normal sample is provided
+        CLAIR3_NORMAL_VCF_FILES=0
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          CLAIR3_NORMAL_VCF_FILES=$(find "$output_folder" -name "${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz" 2>/dev/null | wc -l)
+        fi
+        
+        # Check for mutational pattern output files based on actual WDL outputs
+        MUTATIONAL_PROFILE_FILES=$(find "$output_folder" -name "*.mutation_profile.pdf" 2>/dev/null | wc -l)
+        MUTATIONAL_SIG_FILES=$(find "$output_folder" -name "*.mut_sigs.tsv" 2>/dev/null | wc -l)
+        MUTATIONAL_BOOTSTRAP_FILES=$(find "$output_folder" -name "*.mut_sigs_bootstrapped.tsv" 2>/dev/null | wc -l)
+        MUTATIONAL_RECON_FILES=$(find "$output_folder" -name "*.reconstructed_sigs.tsv" 2>/dev/null | wc -l)
+        MUTATIONAL_OCCURRENCE_FILES=$(find "$output_folder" -name "*.type_occurences.tsv" 2>/dev/null | wc -l)
+        
+        echo "  - Found $DEEPSOMATIC_VCF_FILES DeepSomatic VCF files (${tumor_sample_name}.deepsomatic.vcf.gz)"
+        echo "  - Found $DEEPSOMATIC_GVCF_FILES DeepSomatic GVCF files (${tumor_sample_name}.deepsomatic.g.vcf.gz)"
+        echo "  - Found $CLAIR3_TUMOR_VCF_FILES Clair3 tumor VCF files (${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz)"
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          echo "  - Found $CLAIR3_NORMAL_VCF_FILES Clair3 normal VCF files (${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz)"
+        fi
+        echo "  - Found $MUTATIONAL_PROFILE_FILES mutation profile files"
+        echo "  - Found $MUTATIONAL_SIG_FILES mutation signature files"
+        echo "  - Found $MUTATIONAL_BOOTSTRAP_FILES bootstrap files"
+        echo "  - Found $MUTATIONAL_RECON_FILES reconstructed signature files"
+        echo "  - Found $MUTATIONAL_OCCURRENCE_FILES occurrence files"
+        
+        if [ $DEEPSOMATIC_VCF_FILES -eq 0 ] || [ $DEEPSOMATIC_GVCF_FILES -eq 0 ] || [ $CLAIR3_TUMOR_VCF_FILES -eq 0 ] || [ $MUTATIONAL_PROFILE_FILES -eq 0 ] || [ $MUTATIONAL_SIG_FILES -eq 0 ] || [ $MUTATIONAL_BOOTSTRAP_FILES -eq 0 ] || [ $MUTATIONAL_RECON_FILES -eq 0 ] || [ $MUTATIONAL_OCCURRENCE_FILES -eq 0 ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - DeepSomatic output files missing"
+        fi
+        
+        # Check normal Clair3 VCF files if normal sample is provided
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ] && [ $CLAIR3_NORMAL_VCF_FILES -eq 0 ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Normal Clair3 VCF files missing"
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "*************************"
+          echo "DeepSomatic Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
+
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up resources path based on resources_path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -137,23 +173,6 @@ steps:
         fi
         
 
-        # Check if normal sample parameters are provided
-        NORMAL_SAMPLE_PROVIDED=false
-        if [ -n "$normal_sample_name" ] && [ -n "$normal_aligned_bam" ]; then
-          NORMAL_SAMPLE_PROVIDED=true
-          
-          # Check if normal sample name matches the matched normal sample in sample catalog
-          CATALOG_NORMAL_SAMPLE=$(gautil client catalog-export SampleCatalog Sample:eq:"$tumor_sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')
-          
-          if [ -n "$CATALOG_NORMAL_SAMPLE" ]; then
-            if [ "$normal_sample_name" != "$CATALOG_NORMAL_SAMPLE" ]; then
-              echo "Warning: Normal sample name '$normal_sample_name' does not match the matched normal sample '$CATALOG_NORMAL_SAMPLE' in the sample catalog for tumor sample '$tumor_sample_name'"
-            fi
-          fi
-        elif [ -n "$normal_sample_name" ] || [ -n "$normal_aligned_bam" ]; then
-          echo "Warning: Only one of normal sample name or normal BAM file is provided. Normal sample will be ignored."
-        fi
-
         # Find BAM index files
         TUMOR_BAM_INDEX="${tumor_aligned_bam}.bai"
 
@@ -191,7 +210,7 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX"))"
         echo "⚙️  Configuration:"
         echo "  - Chunk Size: 75,000,000"
         echo "  - Threads: 2"
@@ -200,13 +219,15 @@ steps:
         # Record start time
         SPLIT_START_TIME=$(date +%s)
         
-        cat <<EOF > /scratch/inputs_split_contigs.json
-        {
-          "split_contigs.ref_fasta_index": "$LOCAL_REF_INDEX",
-          "split_contigs.chunk_size": 75000000,
-          "split_contigs.threads": 2
-        }
-        EOF
+        jq -n \
+          --arg ref_fasta_index "$LOCAL_REF_INDEX" \
+          --argjson chunk_size 75000000 \
+          --argjson threads 2 \
+          '{
+            "split_contigs.ref_fasta_index": $ref_fasta_index,
+            "split_contigs.chunk_size": $chunk_size,
+            "split_contigs.threads": $threads
+          }' > /scratch/inputs_split_contigs.json
         
         # Capture miniwdl output and extract contigs array
         MINIWDL_OUTPUT=$(miniwdl run \
@@ -289,14 +310,14 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_BAM") ($(format_file_size "$LOCAL_TUMOR_BAM" "GB") GB)"
-        echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX" "MB") MB)"
+        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_BAM") ($(format_file_size "$LOCAL_TUMOR_BAM"))"
+        echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX"))"
         if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
-          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
-          echo "  - Normal BAM Index: $(basename "$LOCAL_NORMAL_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_BAM_INDEX" "MB") MB)"
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM"))"
+          echo "  - Normal BAM Index: $(basename "$LOCAL_NORMAL_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_BAM_INDEX"))"
         fi
-        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
-        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
+        echo "  - Reference Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX"))"
         echo "⚙️  Configuration:"
         echo "  - Tumor Sample: $tumor_sample_name"
         if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
@@ -336,13 +357,40 @@ steps:
         echo "================================================"
         echo "⏱️  Execution Time: ${DEEPSOMATIC_DURATION_HOUR}h ${DEEPSOMATIC_DURATION_MIN}m ${DEEPSOMATIC_DURATION_SEC}s"
         echo "📁 Output Files:"
-        echo "  - DeepSomatic VCF: ${tumor_sample_name}.deepsomatic.vcf.gz"
+        
+        # Extract and report output file sizes from miniwdl output
+        echo "$MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | select(.key | startswith("run_deepsomatic")) | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
+          fi
+        done
         echo "================================================"
 
         # Extract the deepsomatic VCF path from miniwdl output
         LOCAL_DEEPSOMATIC_VCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.deepsomatic_vcf"')
+        LOCAL_DEEPSOMATIC_GVCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.deepsomatic_gvcf"')
+        LOCAL_CLAIR3_TUMOR_VCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.clair3_tumor_vcf"')
+        
+        # Extract normal Clair3 VCF path if normal sample is provided
+        LOCAL_CLAIR3_NORMAL_VCF=""
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          LOCAL_CLAIR3_NORMAL_VCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.clair3_normal_vcf"')
+        fi
 
-        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" 
+        # Copy DeepSomatic outputs with standardized naming
+        echo "Copying DeepSomatic outputs with standardized naming..."
+        cp "$LOCAL_DEEPSOMATIC_VCF" "${output_folder}/${tumor_sample_name}.deepsomatic.vcf.gz"
+        cp "${LOCAL_DEEPSOMATIC_VCF}.tbi" "${output_folder}/${tumor_sample_name}.deepsomatic.vcf.gz.tbi"
+        cp "$LOCAL_DEEPSOMATIC_GVCF" "${output_folder}/${tumor_sample_name}.deepsomatic.g.vcf.gz"
+        cp "${LOCAL_DEEPSOMATIC_GVCF}.tbi" "${output_folder}/${tumor_sample_name}.deepsomatic.g.vcf.gz.tbi"
+        cp "$LOCAL_CLAIR3_TUMOR_VCF" "${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+        cp "${LOCAL_CLAIR3_TUMOR_VCF}.tbi" "${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz.tbi"
+        
+        # Copy normal Clair3 VCF with standardized naming if normal sample is provided
+        if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
+          cp "$LOCAL_CLAIR3_NORMAL_VCF" "${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+          cp "${LOCAL_CLAIR3_NORMAL_VCF}.tbi" "${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz.tbi"
+        fi
 
         # Run mutational pattern analysis
         echo "================================================"
@@ -350,7 +398,7 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF" "MB") MB)"
+        echo "  - DeepSomatic VCF: $(basename "$LOCAL_DEEPSOMATIC_VCF") ($(format_file_size "$LOCAL_DEEPSOMATIC_VCF"))"
         echo "⚙️  Configuration:"
         echo "  - Sample: $tumor_sample_name"
         echo "  - Max Delta: 0.004"
@@ -360,24 +408,27 @@ steps:
         # Record start time
         MUTATIONAL_START_TIME=$(date +%s)
         
-        cat <<EOF > /scratch/inputs_mutationalpattern.json
-        { 
-          "mutationalpattern.vcf": "$LOCAL_DEEPSOMATIC_VCF",
-          "mutationalpattern.pname": "$tumor_sample_name",
-          "mutationalpattern.max_delta": 0.004,
-          "mutationalpattern.threads": $AGENT_CPU_CORES
-        }
-        EOF
+        jq -n \
+          --arg vcf "$LOCAL_DEEPSOMATIC_VCF" \
+          --arg pname "$tumor_sample_name" \
+          --argjson max_delta 0.004 \
+          --argjson threads "$AGENT_CPU_CORES" \
+          '{
+            "mutationalpattern.vcf": $vcf,
+            "mutationalpattern.pname": $pname,
+            "mutationalpattern.max_delta": $max_delta,
+            "mutationalpattern.threads": $threads
+          }' > /scratch/inputs_mutationalpattern.json
 
         # Run miniwdl
         set +e
-        miniwdl run \
+        MUTATIONAL_MINIWDL_OUTPUT=$(miniwdl run \
           "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
           --task mutationalpattern \
           --dir /scratch \
           --runtime-cpu-max=$AGENT_CPU_CORES \
           --runtime-memory-max=${AGENT_MEMORY_GB}G \
-          -i /scratch/inputs_mutationalpattern.json 2>/dev/null
+          -i /scratch/inputs_mutationalpattern.json 2>/dev/null)
         MINIWDL_EXIT_CODE=$?
         set -e
 
@@ -398,10 +449,16 @@ steps:
         echo "================================================"
         echo "⏱️  Execution Time: ${MUTATIONAL_DURATION_HOUR}h ${MUTATIONAL_DURATION_MIN}m ${MUTATIONAL_DURATION_SEC}s"
         echo "📁 Output Files:"
-        echo "  - Mutational pattern analysis completed"
+        
+        # Extract and report output file sizes from miniwdl output
+        echo "$MUTATIONAL_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | select(.key | startswith("mutationalpattern")) | .value' | while read -r output_file; do
+          if [ -f "$output_file" ]; then
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
+          fi
+        done
         echo "================================================"
 
-        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" 
+        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" > /dev/null 2>&1 
 
         # Copy udocker cache to output folder
         if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then

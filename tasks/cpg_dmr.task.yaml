@@ -51,45 +51,61 @@ steps:
         echo "  - output_folder: $output_folder"
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
+
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
         
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check tumor CpG output files
+        TUMOR_COMBINED_BED="${output_folder}/${tumor_sample_name}.combined.bed.gz"
+        TUMOR_COMBINED_BW="${output_folder}/${tumor_sample_name}.combined.bw"
+        TUMOR_HAP1_BED="${output_folder}/${tumor_sample_name}.hap1.bed.gz"
+        TUMOR_HAP2_BED="${output_folder}/${tumor_sample_name}.hap2.bed.gz"
+        TUMOR_HAP1_BW="${output_folder}/${tumor_sample_name}.hap1.bw"
+        TUMOR_HAP2_BW="${output_folder}/${tumor_sample_name}.hap2.bw"
         
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Check normal CpG output files if normal sample is provided
+        if [ -n "$normal_sample_name" ]; then
+          NORMAL_COMBINED_BED="${output_folder}/${normal_sample_name}.combined.bed.gz"
+          NORMAL_COMBINED_BW="${output_folder}/${normal_sample_name}.combined.bw"
+          NORMAL_HAP1_BED="${output_folder}/${normal_sample_name}.hap1.bed.gz"
+          NORMAL_HAP2_BED="${output_folder}/${normal_sample_name}.hap2.bed.gz"
+          NORMAL_HAP1_BW="${output_folder}/${normal_sample_name}.hap1.bw"
+          NORMAL_HAP2_BW="${output_folder}/${normal_sample_name}.hap2.bw"
+        fi
+        
+        # Check DMR output files
+        DMR_FILE="${output_folder}/${tumor_sample_name}.DMR.tsv"
+        
+        if [ ! -f "$TUMOR_COMBINED_BED" ] || [ ! -f "$TUMOR_COMBINED_BW" ] || [ ! -f "$TUMOR_HAP1_BED" ] || [ ! -f "$TUMOR_HAP2_BED" ] || [ ! -f "$TUMOR_HAP1_BW" ] || [ ! -f "$TUMOR_HAP2_BW" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Tumor CpG output files missing"
+        fi
+        
+        if [ -n "$normal_sample_name" ]; then
+          if [ ! -f "$NORMAL_COMBINED_BED" ] || [ ! -f "$NORMAL_COMBINED_BW" ] || [ ! -f "$NORMAL_HAP1_BED" ] || [ ! -f "$NORMAL_HAP2_BED" ] || [ ! -f "$NORMAL_HAP1_BW" ] || [ ! -f "$NORMAL_HAP2_BW" ]; then
+            OUTPUT_FILES_EXIST=false
+            echo "  - Normal CpG output files missing"
+          fi
+        fi
+        
+        if [ ! -f "$DMR_FILE" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - DMR output files missing"
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "*************************"
+          echo "CpG Pileup and DMR Analysis Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
+        
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up resource path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -183,9 +199,9 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_PHASED_BAM") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM" "GB") GB)"
-        echo "  - BAM Index: $(basename "$LOCAL_TUMOR_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM_INDEX" "MB") MB)"
-        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_PHASED_BAM") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM"))"
+        echo "  - BAM Index: $(basename "$LOCAL_TUMOR_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_PHASED_BAM_INDEX"))"
+        echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
         echo "⚙️  Configuration:"
         echo "  - Sample: $tumor_sample_name"
         echo "  - Threads: $AGENT_CPU_CORES"
@@ -225,16 +241,16 @@ steps:
         echo "⏱️  Execution Time: ${CPG_TUMOR_DURATION_HOUR}h ${CPG_TUMOR_DURATION_MIN}m ${CPG_TUMOR_DURATION_SEC}s"
         echo "📁 Output Files:"
         if [ -f "${tumor_sample_name}.combined.bed.gz" ]; then
-          echo "  - Combined BED: $(basename "${tumor_sample_name}.combined.bed.gz") ($(format_file_size "${tumor_sample_name}.combined.bed.gz" "MB") MB)"
+          echo "  - Combined BED: $(basename "${tumor_sample_name}.combined.bed.gz") ($(format_file_size "${tumor_sample_name}.combined.bed.gz"))"
         fi
         if [ -f "${tumor_sample_name}.combined.bw" ]; then
-          echo "  - Combined BW: $(basename "${tumor_sample_name}.combined.bw") ($(format_file_size "${tumor_sample_name}.combined.bw" "MB") MB)"
+          echo "  - Combined BW: $(basename "${tumor_sample_name}.combined.bw") ($(format_file_size "${tumor_sample_name}.combined.bw"))"
         fi
         if [ -f "${tumor_sample_name}.hap1.bed.gz" ]; then
-          echo "  - Hap1 BED: $(basename "${tumor_sample_name}.hap1.bed.gz") ($(format_file_size "${tumor_sample_name}.hap1.bed.gz" "MB") MB)"
+          echo "  - Hap1 BED: $(basename "${tumor_sample_name}.hap1.bed.gz") ($(format_file_size "${tumor_sample_name}.hap1.bed.gz"))"
         fi
         if [ -f "${tumor_sample_name}.hap2.bed.gz" ]; then
-          echo "  - Hap2 BED: $(basename "${tumor_sample_name}.hap2.bed.gz") ($(format_file_size "${tumor_sample_name}.hap2.bed.gz" "MB") MB)"
+          echo "  - Hap2 BED: $(basename "${tumor_sample_name}.hap2.bed.gz") ($(format_file_size "${tumor_sample_name}.hap2.bed.gz"))"
         fi
         echo "================================================"
         
@@ -245,9 +261,9 @@ steps:
           echo "================================================"
           echo "📅 Server Time: $(date)"
           echo "📁 Input Files:"
-          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_PHASED_BAM") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM" "GB") GB)"
-          echo "  - BAM Index: $(basename "$LOCAL_NORMAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM_INDEX" "MB") MB)"
-          echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
+          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_PHASED_BAM") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM"))"
+          echo "  - BAM Index: $(basename "$LOCAL_NORMAL_PHASED_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_PHASED_BAM_INDEX"))"
+          echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
           echo "⚙️  Configuration:"
           echo "  - Sample: $normal_sample_name"
           echo "  - Threads: $AGENT_CPU_CORES"
@@ -287,16 +303,16 @@ steps:
           echo "⏱️  Execution Time: ${CPG_NORMAL_DURATION_HOUR}h ${CPG_NORMAL_DURATION_MIN}m ${CPG_NORMAL_DURATION_SEC}s"
           echo "📁 Output Files:"
           if [ -f "${normal_sample_name}.combined.bed.gz" ]; then
-            echo "  - Combined BED: $(basename "${normal_sample_name}.combined.bed.gz") ($(format_file_size "${normal_sample_name}.combined.bed.gz" "MB") MB)"
+            echo "  - Combined BED: $(basename "${normal_sample_name}.combined.bed.gz") ($(format_file_size "${normal_sample_name}.combined.bed.gz"))"
           fi
           if [ -f "${normal_sample_name}.combined.bw" ]; then
-            echo "  - Combined BW: $(basename "${normal_sample_name}.combined.bw") ($(format_file_size "${normal_sample_name}.combined.bw" "MB") MB)"
+            echo "  - Combined BW: $(basename "${normal_sample_name}.combined.bw") ($(format_file_size "${normal_sample_name}.combined.bw"))"
           fi
           if [ -f "${normal_sample_name}.hap1.bed.gz" ]; then
-            echo "  - Hap1 BED: $(basename "${normal_sample_name}.hap1.bed.gz") ($(format_file_size "${normal_sample_name}.hap1.bed.gz" "MB") MB)"
+            echo "  - Hap1 BED: $(basename "${normal_sample_name}.hap1.bed.gz") ($(format_file_size "${normal_sample_name}.hap1.bed.gz"))"
           fi
           if [ -f "${normal_sample_name}.hap2.bed.gz" ]; then
-            echo "  - Hap2 BED: $(basename "${normal_sample_name}.hap2.bed.gz") ($(format_file_size "${normal_sample_name}.hap2.bed.gz" "MB") MB)"
+            echo "  - Hap2 BED: $(basename "${normal_sample_name}.hap2.bed.gz") ($(format_file_size "${normal_sample_name}.hap2.bed.gz"))"
           fi
           echo "================================================"
         fi
@@ -455,8 +471,7 @@ steps:
         # Extract and report output file sizes
         echo "$DMR_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
           if [ -f "$output_file" ]; then
-            file_size_kb=$(format_file_size "$output_file" "KB")
-            echo "  - $(basename "$output_file") ($file_size_kb KB)"
+            echo "  - $(basename "$output_file") ($(format_file_size "$output_file"))"
           fi
         done
         echo "================================================"

@@ -44,44 +44,35 @@ steps:
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
 
-        # Function to format file sizes using shell arithmetic
-        format_file_size() {
-            local file_path="$1"
-            local unit="$2"  # "KB", "MB", or "GB"
-            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "0")
-            
-            case "$unit" in
-                "KB")
-                    local size_kb=$((file_size / 1024))
-                    local remainder_bytes=$((file_size % 1024))
-                    local decimal_part=$((remainder_bytes * 100 / 1024))
-                    echo "${size_kb}.${decimal_part}"
-                    ;;
-                "MB")
-                    local size_mb=$((file_size / 1024 / 1024))
-                    local remainder_kb=$(((file_size % (1024 * 1024)) / 1024))
-                    local decimal_part=$((remainder_kb * 100 / 1024))
-                    echo "${size_mb}.${decimal_part}"
-                    ;;
-                "GB")
-                    local size_gb=$((file_size / 1024 / 1024 / 1024))
-                    local remainder_mb=$(((file_size % (1024 * 1024 * 1024)) / 1024 / 1024))
-                    local decimal_part=$((remainder_mb * 100 / 1024))
-                    echo "${size_gb}.${decimal_part}"
-                    ;;
-                *)
-                    echo "0.0"
-                    ;;
-            esac
-        }
+        # Check if output files already exist
+        echo "Checking if output files already exist..."
+        OUTPUT_FILES_EXIST=true
         
-        handle_miniwdl_failure() {
-          local exit_code=$1
-          echo "MiniWDL run failed with exit code $exit_code"
-          echo "Capturing debug information..."
-          bash "$TASK_DIR/utils/miniwdl-debug-capture.sh" /scratch/_LAST "$output_folder" "$TASK_NAME"
-          exit $exit_code
-        }
+        # Check for specific mosdepth output files
+        OUTPUT_BED="${output_folder}/${sample_name}.regions.bed.gz"
+        OUTPUT_BED_INDEX="${output_folder}/${sample_name}.regions.bed.gz.csi"
+        OUTPUT_SUMMARY="${output_folder}/${sample_name}.mosdepth.summary.txt"
+        
+        if [ ! -f "$OUTPUT_BED" ] || [ ! -f "$OUTPUT_BED_INDEX" ] || [ ! -f "$OUTPUT_SUMMARY" ]; then
+          OUTPUT_FILES_EXIST=false
+          echo "  - Mosdepth output files missing"
+        fi
+        
+        if [ "$OUTPUT_FILES_EXIST" = true ]; then
+          echo "All output files already exist. Skipping task as no-op."
+          echo "  - Regions BED: $(basename "$OUTPUT_BED") ($(format_file_size "$OUTPUT_BED"))"
+          echo "  - BED Index: $(basename "$OUTPUT_BED_INDEX") ($(format_file_size "$OUTPUT_BED_INDEX"))"
+          echo "  - Summary: $(basename "$OUTPUT_SUMMARY") ($(format_file_size "$OUTPUT_SUMMARY"))"
+          echo "*************************"
+          echo "Mosdepth Task completed (skipped - outputs exist)"
+          echo "*************************"
+          exit 0
+        else
+          echo "Output files missing. Proceeding with analysis..."
+        fi
+
+        # Source common utility functions
+        source "$TASK_DIR/utils/utils.sh"
 
         # Set up env variables for miniwdl
         export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker
@@ -118,8 +109,8 @@ steps:
         echo "================================================"
         echo "📅 Server Time: $(date)"
         echo "📁 Input Files:"
-        echo "  - Aligned BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM" "GB") GB)"
-        echo "  - BAM Index: $(basename "$LOCAL_BAM_INDEX") ($(format_file_size "$LOCAL_BAM_INDEX" "MB") MB)"
+        echo "  - Aligned BAM: $(basename "$LOCAL_BAM") ($(format_file_size "$LOCAL_BAM"))"
+        echo "  - BAM Index: $(basename "$LOCAL_BAM_INDEX") ($(format_file_size "$LOCAL_BAM_INDEX"))"
         echo "⚙️  Configuration:"
         echo "  - Sample: $sample_name"
         echo "  - Threads: $AGENT_CPU_CORES"
@@ -129,25 +120,27 @@ steps:
         MOSDEPTH_START_TIME=$(date +%s)
         
         # Define minidwl input JSON
-        cat <<EOF > /scratch/inputs.json
-        {
-          "mosdepth.pname": "$sample_name",
-          "mosdepth.bam": "$LOCAL_BAM",
-          "mosdepth.bam_index": "$LOCAL_BAM_INDEX",
-          "mosdepth.threads": $AGENT_CPU_CORES
-        }
-        EOF
+        jq -n \
+          --arg pname "$sample_name" \
+          --arg bam "$LOCAL_BAM" \
+          --arg bam_index "$LOCAL_BAM_INDEX" \
+          --argjson threads "$AGENT_CPU_CORES" \
+          '{
+            "mosdepth.pname": $pname,
+            "mosdepth.bam": $bam,
+            "mosdepth.bam_index": $bam_index,
+            "mosdepth.threads": $threads
+          }' > /scratch/inputs.json
 
-        # Run miniwdl and capture exit code, but don't exit on failure
+        # Run miniwdl and capture output
         set +e
-        miniwdl run \
+        MOSDEPTH_OUTPUT=$(miniwdl run \
           "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
           --task mosdepth \
           --dir /scratch \
           --runtime-cpu-max=$AGENT_CPU_CORES \
           --runtime-memory-max=${AGENT_MEMORY_GB}G \
-          -i /scratch/inputs.json 2>/dev/null
-
+          -i /scratch/inputs.json 2>/dev/null)
         MINIWDL_EXIT_CODE=$?
         set -e
 
@@ -155,6 +148,11 @@ steps:
           echo "Mosdepth failed with exit code $MINIWDL_EXIT_CODE"
           handle_miniwdl_failure $MINIWDL_EXIT_CODE
         fi
+
+        # Extract output file paths from MOSDEPTH_OUTPUT
+        MOSDEPTH_OUTPUT_BED=$(echo "$MOSDEPTH_OUTPUT" | jq -r '.outputs."mosdepth.output_bed"')
+        MOSDEPTH_OUTPUT_BED_INDEX=$(echo "$MOSDEPTH_OUTPUT" | jq -r '.outputs."mosdepth.output_bed_index"')
+        MOSDEPTH_OUTPUT_SUMMARY=$(echo "$MOSDEPTH_OUTPUT" | jq -r '.outputs."mosdepth.output_summary"')
 
         # Post-execution logging for Mosdepth
         MOSDEPTH_END_TIME=$(date +%s)
@@ -168,8 +166,29 @@ steps:
         echo "================================================"
         echo "⏱️  Execution Time: ${MOSDEPTH_DURATION_HOUR}h ${MOSDEPTH_DURATION_MIN}m ${MOSDEPTH_DURATION_SEC}s"
         echo "📁 Output Files:"
-        echo "  - Coverage depth analysis completed"
+        
+        if [ -f "$MOSDEPTH_OUTPUT_BED" ]; then
+          echo "  - Regions BED: $(basename "$MOSDEPTH_OUTPUT_BED") ($(format_file_size "$MOSDEPTH_OUTPUT_BED"))"
+        fi
+        if [ -f "$MOSDEPTH_OUTPUT_BED_INDEX" ]; then
+          echo "  - BED Index: $(basename "$MOSDEPTH_OUTPUT_BED_INDEX") ($(format_file_size "$MOSDEPTH_OUTPUT_BED_INDEX"))"
+        fi
+        if [ -f "$MOSDEPTH_OUTPUT_SUMMARY" ]; then
+          echo "  - Summary: $(basename "$MOSDEPTH_OUTPUT_SUMMARY") ($(format_file_size "$MOSDEPTH_OUTPUT_SUMMARY"))"
+        fi
         echo "================================================"
+
+        # Copy output files to output folder
+        echo "Copying mosdepth outputs..."
+        if [ -f "$MOSDEPTH_OUTPUT_BED" ]; then
+          cp "$MOSDEPTH_OUTPUT_BED" "$output_folder/${sample_name}.regions.bed.gz" 2>/dev/null || echo "Warning: Regions BED file not found"
+        fi
+        if [ -f "$MOSDEPTH_OUTPUT_BED_INDEX" ]; then
+          cp "$MOSDEPTH_OUTPUT_BED_INDEX" "$output_folder/${sample_name}.regions.bed.gz.csi" 2>/dev/null || echo "Warning: BED index file not found"
+        fi
+        if [ -f "$MOSDEPTH_OUTPUT_SUMMARY" ]; then
+          cp "$MOSDEPTH_OUTPUT_SUMMARY" "$output_folder/${sample_name}.mosdepth.summary.txt" 2>/dev/null || echo "Warning: Summary file not found"
+        fi
 
         # Copy udocker cache to output folder
         if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then
