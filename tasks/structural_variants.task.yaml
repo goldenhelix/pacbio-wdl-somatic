@@ -315,135 +315,115 @@ steps:
         # - TRF BED
         # - PON TSV (note: this is optional in the WDL workflow, so ignoring it here)
 
-        # Check if Severus outputs already exist in input folder
-        SEVERUS_OUTPUT_VCF="${input_folder}/${tumor_sample_name}_severus/somatic_SVs/severus_somatic.vcf"
-        SEVERUS_ALL_VCF="${input_folder}/${tumor_sample_name}_severus/all_SVs/severus_all.vcf"
+        # Pre-execution logging for Severus
+        echo "================================================"
+        echo "🚀 STARTING SEVERUS ANALYSIS"
+        echo "================================================"
+        echo "📅 Server Time: $(date)"
+        echo "📁 Input Files:"
+        echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_BAM") ($(format_file_size "$LOCAL_TUMOR_BAM" "GB") GB)"
+        echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX" "MB") MB)"
+        echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
+        echo "  - Normal BAM Index: $(basename "$LOCAL_NORMAL_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_BAM_INDEX" "MB") MB)"
+        echo "  - Normal Phased VCF: $(basename "$LOCAL_NORMAL_PHASED_VCF") ($(format_file_size "$LOCAL_NORMAL_PHASED_VCF" "MB") MB)"
+        echo "  - TRF BED: $(basename "$LOCAL_TRF_BED") ($(format_file_size "$LOCAL_TRF_BED" "MB") MB)"
+        echo "⚙️  Configuration:"
+        echo "  - Threads: $AGENT_CPU_CORES"
+        echo "  - Min Support Reads: 3"
+        echo "================================================"
         
-        if [ -f "$SEVERUS_OUTPUT_VCF" ] && [ -f "$SEVERUS_ALL_VCF" ]; then
-          echo "Severus outputs already exist, copying to /scratch and skipping Severus execution..."
-          
-          # Copy existing Severus outputs to /scratch
-          cp -r "${input_folder}/${tumor_sample_name}_severus" "/scratch/"
-          
-          # Set the SEVERUS_OUTPUT variable to simulate successful completion
-          SEVERUS_OUTPUT='{"outputs":{"Severus_sv.output_vcf":"/scratch/'${tumor_sample_name}'_severus/somatic_SVs/severus_somatic.vcf","Severus_sv.output_all_vcf":"/scratch/'${tumor_sample_name}'_severus/all_SVs/severus_all.vcf"}}'
-          
-          echo "Severus outputs copied successfully"
-          echo "Severus output: $SEVERUS_OUTPUT"
-        else
-          echo "Severus outputs not found, running Severus..."
-          
-          # Pre-execution logging for Severus
-          echo "================================================"
-          echo "🚀 STARTING SEVERUS ANALYSIS"
-          echo "================================================"
-          echo "📅 Server Time: $(date)"
-          echo "📁 Input Files:"
-          echo "  - Tumor BAM: $(basename "$LOCAL_TUMOR_BAM") ($(format_file_size "$LOCAL_TUMOR_BAM" "GB") GB)"
-          echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX" "MB") MB)"
-          echo "  - Normal BAM: $(basename "$LOCAL_NORMAL_BAM") ($(format_file_size "$LOCAL_NORMAL_BAM" "GB") GB)"
-          echo "  - Normal BAM Index: $(basename "$LOCAL_NORMAL_BAM_INDEX") ($(format_file_size "$LOCAL_NORMAL_BAM_INDEX" "MB") MB)"
-          echo "  - Normal Phased VCF: $(basename "$LOCAL_NORMAL_PHASED_VCF") ($(format_file_size "$LOCAL_NORMAL_PHASED_VCF" "MB") MB)"
-          echo "  - TRF BED: $(basename "$LOCAL_TRF_BED") ($(format_file_size "$LOCAL_TRF_BED" "MB") MB)"
-          echo "⚙️  Configuration:"
-          echo "  - Threads: $AGENT_CPU_CORES"
-          echo "  - Min Support Reads: 3"
-          echo "================================================"
-          
-          # Record start time
-          SEVERUS_START_TIME=$(date +%s)
-          
-          # Run Severus
-          echo "Running Severus..."
-          jq -n \
-            --arg pname "$tumor_sample_name" \
-            --arg bam "$LOCAL_TUMOR_BAM" \
-            --arg bam_index "$LOCAL_TUMOR_BAM_INDEX" \
-            --arg normal_bam "$LOCAL_NORMAL_BAM" \
-            --arg normal_bam_index "$LOCAL_NORMAL_BAM_INDEX" \
-            --arg phased_vcf "$LOCAL_NORMAL_PHASED_VCF" \
-            --arg trf_bed "$LOCAL_TRF_BED" \
-            --argjson threads "$AGENT_CPU_CORES" \
-            --argjson min_supp_reads 3 \
-            '{
-              "Severus_sv.pname": $pname,
-              "Severus_sv.tumor_bam": $bam,
-              "Severus_sv.tumor_bam_index": $bam_index,
-              "Severus_sv.normal_bam": $normal_bam,
-              "Severus_sv.normal_bam_index": $normal_bam_index,
-              "Severus_sv.phased_vcf": $phased_vcf,
-              "Severus_sv.trf_bed": $trf_bed,
-              "Severus_sv.threads": $threads,
-              "Severus_sv.min_supp_reads": $min_supp_reads
-            }' > /scratch/severus_inputs.json
+        # Record start time
+        SEVERUS_START_TIME=$(date +%s)
+        
+        # Run Severus
+        echo "Running Severus..."
+        jq -n \
+          --arg pname "$tumor_sample_name" \
+          --arg bam "$LOCAL_TUMOR_BAM" \
+          --arg bam_index "$LOCAL_TUMOR_BAM_INDEX" \
+          --arg normal_bam "$LOCAL_NORMAL_BAM" \
+          --arg normal_bam_index "$LOCAL_NORMAL_BAM_INDEX" \
+          --arg phased_vcf "$LOCAL_NORMAL_PHASED_VCF" \
+          --arg trf_bed "$LOCAL_TRF_BED" \
+          --argjson threads "$AGENT_CPU_CORES" \
+          --argjson min_supp_reads 3 \
+          '{
+            "Severus_sv.pname": $pname,
+            "Severus_sv.tumor_bam": $bam,
+            "Severus_sv.tumor_bam_index": $bam_index,
+            "Severus_sv.normal_bam": $normal_bam,
+            "Severus_sv.normal_bam_index": $normal_bam_index,
+            "Severus_sv.phased_vcf": $phased_vcf,
+            "Severus_sv.trf_bed": $trf_bed,
+            "Severus_sv.threads": $threads,
+            "Severus_sv.min_supp_reads": $min_supp_reads
+          }' > /scratch/severus_inputs.json
 
-          set +e
-          SEVERUS_OUTPUT=$(miniwdl run \
-            "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/structural_variants_updated.wdl" \
-            --task Severus_sv \
-            --dir /scratch \
-            --runtime-cpu-max=$AGENT_CPU_CORES \
-            --runtime-memory-max=${AGENT_MEMORY_GB}G \
-            --no-cache \
-            -i /scratch/severus_inputs.json 2>/dev/null)
-          SEVERUS_OUTPUT_EXIT_CODE=$?
-          if [ $SEVERUS_OUTPUT_EXIT_CODE -ne 0 ]; then
-            handle_miniwdl_failure $SEVERUS_OUTPUT_EXIT_CODE
-          fi
-          
-          # Post-execution logging for Severus
-          SEVERUS_END_TIME=$(date +%s)
-          SEVERUS_DURATION=$((SEVERUS_END_TIME - SEVERUS_START_TIME))
-          SEVERUS_DURATION_HOUR=$((SEVERUS_DURATION / 3600))
-          SEVERUS_DURATION_MIN=$(((SEVERUS_DURATION % 3600) / 60))
-          SEVERUS_DURATION_SEC=$((SEVERUS_DURATION % 60))
-          
-          echo "================================================"
-          echo "✅ SEVERUS ANALYSIS COMPLETED SUCCESSFULLY"
-          echo "================================================"
-          echo "⏱️  Execution Time: ${SEVERUS_DURATION_HOUR}h ${SEVERUS_DURATION_MIN}m ${SEVERUS_DURATION_SEC}s"
-          
-          # Extract output file paths from SEVERUS_OUTPUT
-          SEVERUS_SOMATIC_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_vcf"')
-          SEVERUS_ALL_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_all_vcf"')
-          
-          # Calculate total output size
-          SEVERUS_TOTAL_SIZE=0
-          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
-            SEVERUS_TOTAL_SIZE=$((SEVERUS_TOTAL_SIZE + $(stat -c%s "$SEVERUS_SOMATIC_VCF" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "$SEVERUS_ALL_VCF" ]; then
-            SEVERUS_TOTAL_SIZE=$((SEVERUS_TOTAL_SIZE + $(stat -c%s "$SEVERUS_ALL_VCF" 2>/dev/null || echo "0")))
-          fi
-          
-          # Format total size
-          if [ $SEVERUS_TOTAL_SIZE -ge 1073741824 ]; then
-            SEVERUS_TOTAL_GB=$((SEVERUS_TOTAL_SIZE / 1024 / 1024 / 1024))
-            SEVERUS_TOTAL_MB=$(((SEVERUS_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
-            SEVERUS_TOTAL_DECIMAL=$((SEVERUS_TOTAL_MB * 100 / 1024))
-            SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_GB}.${SEVERUS_TOTAL_DECIMAL} GB"
-          elif [ $SEVERUS_TOTAL_SIZE -ge 1048576 ]; then
-            SEVERUS_TOTAL_MB=$((SEVERUS_TOTAL_SIZE / 1024 / 1024))
-            SEVERUS_TOTAL_KB=$(((SEVERUS_TOTAL_SIZE % (1024 * 1024)) / 1024))
-            SEVERUS_TOTAL_DECIMAL=$((SEVERUS_TOTAL_KB * 100 / 1024))
-            SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_MB}.${SEVERUS_TOTAL_DECIMAL} MB"
-          else
-            SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_SIZE} bytes"
-          fi
-          
-          echo "📁 **Total Output Size: $SEVERUS_TOTAL_FORMATTED**"
-          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
-          echo "📁 Output Files:"
-          
-          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
-            echo "  - Somatic SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
-          fi
-          if [ -f "$SEVERUS_ALL_VCF" ]; then
-            echo "  - All SV VCF: $(basename "$SEVERUS_ALL_VCF") ($(format_file_size "$SEVERUS_ALL_VCF"))"
-          fi
-          echo "================================================"
-          
+        set +e
+        SEVERUS_OUTPUT=$(miniwdl run \
+          "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/structural_variants_updated.wdl" \
+          --task Severus_sv \
+          --dir /scratch \
+          --runtime-cpu-max=$AGENT_CPU_CORES \
+          --runtime-memory-max=${AGENT_MEMORY_GB}G \
+          --no-cache \
+          -i /scratch/severus_inputs.json 2>/dev/null)
+        SEVERUS_OUTPUT_EXIT_CODE=$?
+        if [ $SEVERUS_OUTPUT_EXIT_CODE -ne 0 ]; then
+          handle_miniwdl_failure $SEVERUS_OUTPUT_EXIT_CODE
         fi
+        
+        # Post-execution logging for Severus
+        SEVERUS_END_TIME=$(date +%s)
+        SEVERUS_DURATION=$((SEVERUS_END_TIME - SEVERUS_START_TIME))
+        SEVERUS_DURATION_HOUR=$((SEVERUS_DURATION / 3600))
+        SEVERUS_DURATION_MIN=$(((SEVERUS_DURATION % 3600) / 60))
+        SEVERUS_DURATION_SEC=$((SEVERUS_DURATION % 60))
+        
+        echo "================================================"
+        echo "✅ SEVERUS ANALYSIS COMPLETED SUCCESSFULLY"
+        echo "================================================"
+        echo "⏱️  Execution Time: ${SEVERUS_DURATION_HOUR}h ${SEVERUS_DURATION_MIN}m ${SEVERUS_DURATION_SEC}s"
+        
+        # Extract output file paths from SEVERUS_OUTPUT
+        SEVERUS_SOMATIC_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_vcf"')
+        SEVERUS_ALL_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_all_vcf"')
+        
+        # Calculate total output size
+        SEVERUS_TOTAL_SIZE=0
+        if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+          SEVERUS_TOTAL_SIZE=$((SEVERUS_TOTAL_SIZE + $(stat -c%s "$SEVERUS_SOMATIC_VCF" 2>/dev/null || echo "0")))
+        fi
+        if [ -f "$SEVERUS_ALL_VCF" ]; then
+          SEVERUS_TOTAL_SIZE=$((SEVERUS_TOTAL_SIZE + $(stat -c%s "$SEVERUS_ALL_VCF" 2>/dev/null || echo "0")))
+        fi
+        
+        # Format total size
+        if [ $SEVERUS_TOTAL_SIZE -ge 1073741824 ]; then
+          SEVERUS_TOTAL_GB=$((SEVERUS_TOTAL_SIZE / 1024 / 1024 / 1024))
+          SEVERUS_TOTAL_MB=$(((SEVERUS_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+          SEVERUS_TOTAL_DECIMAL=$((SEVERUS_TOTAL_MB * 100 / 1024))
+          SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_GB}.${SEVERUS_TOTAL_DECIMAL} GB"
+        elif [ $SEVERUS_TOTAL_SIZE -ge 1048576 ]; then
+          SEVERUS_TOTAL_MB=$((SEVERUS_TOTAL_SIZE / 1024 / 1024))
+          SEVERUS_TOTAL_KB=$(((SEVERUS_TOTAL_SIZE % (1024 * 1024)) / 1024))
+          SEVERUS_TOTAL_DECIMAL=$((SEVERUS_TOTAL_KB * 100 / 1024))
+          SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_MB}.${SEVERUS_TOTAL_DECIMAL} MB"
+        else
+          SEVERUS_TOTAL_FORMATTED="${SEVERUS_TOTAL_SIZE} bytes"
+        fi
+        
+        echo "📁 **Total Output Size: $SEVERUS_TOTAL_FORMATTED**"
+        echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+        echo "📁 Output Files:"
+        
+        if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+          echo "  - Somatic SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
+        fi
+        if [ -f "$SEVERUS_ALL_VCF" ]; then
+          echo "  - All SV VCF: $(basename "$SEVERUS_ALL_VCF") ($(format_file_size "$SEVERUS_ALL_VCF"))"
+        fi
+        echo "================================================"
       
         # Wakhan:
         # - Tumor BAM
@@ -467,10 +447,6 @@ steps:
           exit 1
         fi
 
-        # Copy Severus VCF to scratch
-        LOCAL_SEVERUS_SV_VCF="/scratch/$(basename "$SEVERUS_SV_VCF")"
-        cp "$SEVERUS_SV_VCF" "$LOCAL_SEVERUS_SV_VCF"
-
         # Pre-execution logging for Wakhan
         echo "================================================"
         echo "🚀 STARTING WAKHAN ANALYSIS"
@@ -481,7 +457,7 @@ steps:
         echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX" "MB") MB)"
         echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA" "GB") GB)"
         echo "  - Reference FASTA Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX" "MB") MB)"
-        echo "  - Severus SV VCF: $(basename "$LOCAL_SEVERUS_SV_VCF") ($(format_file_size "$LOCAL_SEVERUS_SV_VCF" "MB") MB)"
+        echo "  - Severus SV VCF: $(basename "$SEVERUS_SV_VCF") ($(format_file_size "$SEVERUS_SV_VCF" "MB") MB)"
         echo "  - Normal Phased VCF: $(basename "$LOCAL_NORMAL_PHASED_VCF") ($(format_file_size "$LOCAL_NORMAL_PHASED_VCF" "MB") MB)"
         echo "  - Tumor Phased VCF: $(basename "$LOCAL_TUMOR_PHASED_VCF") ($(format_file_size "$LOCAL_TUMOR_PHASED_VCF" "MB") MB)"
         echo "================================================"
@@ -540,7 +516,7 @@ steps:
         cd /scratch
         
         # Build Wakhan command arguments
-        WAKHAN_ARGS="--threads $AGENT_CPU_CORES --target-bam $LOCAL_TUMOR_BAM --reference $LOCAL_REF_FASTA --genome-name $tumor_sample_name --out-dir $tumor_sample_name""_wakhan --breakpoints $LOCAL_SEVERUS_SV_VCF --loh-enable --ploidy-range 1-6 --purity-range 0.2-1.0"
+        WAKHAN_ARGS="--threads $AGENT_CPU_CORES --target-bam $LOCAL_TUMOR_BAM --reference $LOCAL_REF_FASTA --genome-name $tumor_sample_name --out-dir $tumor_sample_name""_wakhan --breakpoints $SEVERUS_SV_VCF --loh-enable --ploidy-range 1-6 --purity-range 0.2-1.0"
         
         # Add centromere annotation file (from installed Wakhan)
         CENTROMERE_BED="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources/human_GRCh38_no_alt_analysis_set.centromere.bed"
@@ -953,7 +929,12 @@ steps:
 
         # Copy Severus outputs
         echo "Copying Severus outputs..."
-        cp -r ${tumor_sample_name}_severus "$output_folder/" 2>/dev/null || echo "Warning: Severus output directory not found"
+        if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+          cp "$SEVERUS_SOMATIC_VCF" "$output_folder/${tumor_sample_name}.severus_somatic.vcf.gz" 2>/dev/null || echo "Warning: Severus somatic VCF not found"
+        fi
+        if [ -f "$SEVERUS_ALL_VCF" ]; then
+          cp "$SEVERUS_ALL_VCF" "$output_folder/${tumor_sample_name}.severus_all.vcf.gz" 2>/dev/null || echo "Warning: Severus all VCF not found" 
+        fi
 
         # Copy Wakhan outputs
         echo "Copying Wakhan outputs..."
