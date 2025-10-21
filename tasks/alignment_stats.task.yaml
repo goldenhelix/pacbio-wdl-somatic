@@ -181,11 +181,16 @@ steps:
 
         # Copy output of seqkit_bamstats to output folder
         echo "Copying SeqKit outputs..."
-        echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+        SEQKIT_OUTPUT_FILES=()
+        while IFS= read -r output_file; do
           if [ -f "$output_file" ]; then
-            cp "$output_file" "$output_folder"/
+            SEQKIT_OUTPUT_FILES+=("$output_file")
           fi
-        done
+        done < <(echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value')
+        
+        if [ ${#SEQKIT_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${SEQKIT_OUTPUT_FILES[@]}"
+        fi
 
         # Get seqkit_alignment_stats from BAMSTATS_MINIWDL_OUTPUT
         LOCAL_SEQKIT_ALIGNMENT_STATS=$(echo "$BAMSTATS_MINIWDL_OUTPUT" | jq -r '.outputs."seqkit_bamstats.seqkit_alignment_stats"')
@@ -253,11 +258,16 @@ steps:
         
         # Copy output of summarize_seqkit_alignment to output folder
         echo "Copying summary outputs..."
-        echo "$SUMMARY_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value' | while read -r output_file; do
+        SUMMARY_OUTPUT_FILES=()
+        while IFS= read -r output_file; do
           if [ -f "$output_file" ]; then
-            cp "$output_file" "$output_folder"/
+            SUMMARY_OUTPUT_FILES+=("$output_file")
           fi
-        done
+        done < <(echo "$SUMMARY_MINIWDL_OUTPUT" | jq -r '.outputs | to_entries[] | .value')
+        
+        if [ ${#SUMMARY_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${SUMMARY_OUTPUT_FILES[@]}"
+        fi
 
         # Copy udocker cache to output folder
         if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then

@@ -356,39 +356,72 @@ steps:
 
         # Copy all outputs to output folder
         echo "Copying HiPhase outputs..."
+        HIPHASE_OUTPUT_FILES=()
         
         # Copy phased VCFs
-        cp "$PHASED_CLAIR3_VCF_NAME" "$output_folder/"
-        cp "$PHASED_DEEPSOMATIC_VCF_NAME" "$output_folder/"
-        if [ -n "$normal_sample_name" ]; then
-          cp "$PHASED_NORMAL_CLAIR3_VCF_NAME" "$output_folder/"
+        if [ -f "$PHASED_CLAIR3_VCF_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_CLAIR3_VCF_NAME")
+        fi
+        if [ -f "$PHASED_DEEPSOMATIC_VCF_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_DEEPSOMATIC_VCF_NAME")
+        fi
+        if [ -n "$normal_sample_name" ] && [ -f "$PHASED_NORMAL_CLAIR3_VCF_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_NORMAL_CLAIR3_VCF_NAME")
         fi
         
         # Copy phased VCF indices
-        cp "$PHASED_CLAIR3_VCF_INDEX_NAME" "$output_folder/"
-        cp "$PHASED_DEEPSOMATIC_VCF_INDEX_NAME" "$output_folder/"
-        if [ -n "$normal_sample_name" ]; then
-          cp "$PHASED_NORMAL_CLAIR3_VCF_INDEX_NAME" "$output_folder/"
+        if [ -f "$PHASED_CLAIR3_VCF_INDEX_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_CLAIR3_VCF_INDEX_NAME")
+        fi
+        if [ -f "$PHASED_DEEPSOMATIC_VCF_INDEX_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_DEEPSOMATIC_VCF_INDEX_NAME")
+        fi
+        if [ -n "$normal_sample_name" ] && [ -f "$PHASED_NORMAL_CLAIR3_VCF_INDEX_NAME" ]; then
+          HIPHASE_OUTPUT_FILES+=("$PHASED_NORMAL_CLAIR3_VCF_INDEX_NAME")
         fi
         
         # Copy haplotagged BAMs and indices
-        cp "$tumor_sample_name.hiphase.bam" "$output_folder/"
-        cp "$tumor_sample_name.hiphase.bam.bai" "$output_folder/"
+        if [ -f "$tumor_sample_name.hiphase.bam" ]; then
+          HIPHASE_OUTPUT_FILES+=("$tumor_sample_name.hiphase.bam")
+        fi
+        if [ -f "$tumor_sample_name.hiphase.bam.bai" ]; then
+          HIPHASE_OUTPUT_FILES+=("$tumor_sample_name.hiphase.bam.bai")
+        fi
         if [ -n "$normal_sample_name" ]; then
-          cp "$normal_sample_name.hiphase.bam" "$output_folder/"
-          cp "$normal_sample_name.hiphase.bam.bai" "$output_folder/"
+          if [ -f "$normal_sample_name.hiphase.bam" ]; then
+            HIPHASE_OUTPUT_FILES+=("$normal_sample_name.hiphase.bam")
+          fi
+          if [ -f "$normal_sample_name.hiphase.bam.bai" ]; then
+            HIPHASE_OUTPUT_FILES+=("$normal_sample_name.hiphase.bam.bai")
+          fi
         fi
         
         # Copy phase statistics files
-        cp "$tumor_sample_name.hiphase.stats.tsv" "$output_folder/"
-        cp "$tumor_sample_name.hiphase.blocks.tsv" "$output_folder/"
+        if [ -f "$tumor_sample_name.hiphase.stats.tsv" ]; then
+          HIPHASE_OUTPUT_FILES+=("$tumor_sample_name.hiphase.stats.tsv")
+        fi
+        if [ -f "$tumor_sample_name.hiphase.blocks.tsv" ]; then
+          HIPHASE_OUTPUT_FILES+=("$tumor_sample_name.hiphase.blocks.tsv")
+        fi
         gzip "$tumor_sample_name.hiphase.haplotags.tsv"
-        cp "$tumor_sample_name.hiphase.haplotags.tsv.gz" "$output_folder/"
+        if [ -f "$tumor_sample_name.hiphase.haplotags.tsv.gz" ]; then
+          HIPHASE_OUTPUT_FILES+=("$tumor_sample_name.hiphase.haplotags.tsv.gz")
+        fi
         if [ -n "$normal_sample_name" ]; then
-          cp "$normal_sample_name.hiphase.stats.tsv" "$output_folder/"
-          cp "$normal_sample_name.hiphase.blocks.tsv" "$output_folder/"
+          if [ -f "$normal_sample_name.hiphase.stats.tsv" ]; then
+            HIPHASE_OUTPUT_FILES+=("$normal_sample_name.hiphase.stats.tsv")
+          fi
+          if [ -f "$normal_sample_name.hiphase.blocks.tsv" ]; then
+            HIPHASE_OUTPUT_FILES+=("$normal_sample_name.hiphase.blocks.tsv")
+          fi
           gzip "$normal_sample_name.hiphase.haplotags.tsv"
-          cp "$normal_sample_name.hiphase.haplotags.tsv.gz" "$output_folder/"
+          if [ -f "$normal_sample_name.hiphase.haplotags.tsv.gz" ]; then
+            HIPHASE_OUTPUT_FILES+=("$normal_sample_name.hiphase.haplotags.tsv.gz")
+          fi
+        fi
+        
+        if [ ${#HIPHASE_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${HIPHASE_OUTPUT_FILES[@]}"
         fi
         
         # Copy HiPhase binary to cache for future use

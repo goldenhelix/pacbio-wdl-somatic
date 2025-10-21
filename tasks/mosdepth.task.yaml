@@ -98,8 +98,7 @@ steps:
 
         # Copy BAM files to /scratch
         echo "Copying input files..."
-        cp "${aligned_bam}" /scratch/
-        cp "$BAM_INDEX" /scratch/
+        copy_with_progress "/scratch" "${aligned_bam}" "$BAM_INDEX"
         LOCAL_BAM="/scratch/$(basename "${aligned_bam}")"
         LOCAL_BAM_INDEX="/scratch/$(basename "${BAM_INDEX}")"
 
@@ -180,14 +179,18 @@ steps:
 
         # Copy output files to output folder
         echo "Copying mosdepth outputs..."
+        MOSDEPTH_OUTPUT_FILES=()
         if [ -f "$MOSDEPTH_OUTPUT_BED" ]; then
-          cp "$MOSDEPTH_OUTPUT_BED" "$output_folder/${sample_name}.regions.bed.gz" 2>/dev/null || echo "Warning: Regions BED file not found"
+          MOSDEPTH_OUTPUT_FILES+=("$MOSDEPTH_OUTPUT_BED")
         fi
         if [ -f "$MOSDEPTH_OUTPUT_BED_INDEX" ]; then
-          cp "$MOSDEPTH_OUTPUT_BED_INDEX" "$output_folder/${sample_name}.regions.bed.gz.csi" 2>/dev/null || echo "Warning: BED index file not found"
+          MOSDEPTH_OUTPUT_FILES+=("$MOSDEPTH_OUTPUT_BED_INDEX")
         fi
         if [ -f "$MOSDEPTH_OUTPUT_SUMMARY" ]; then
-          cp "$MOSDEPTH_OUTPUT_SUMMARY" "$output_folder/${sample_name}.mosdepth.summary.txt" 2>/dev/null || echo "Warning: Summary file not found"
+          MOSDEPTH_OUTPUT_FILES+=("$MOSDEPTH_OUTPUT_SUMMARY")
+        fi
+        if [ ${#MOSDEPTH_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${MOSDEPTH_OUTPUT_FILES[@]}"
         fi
 
         # Copy udocker cache to output folder

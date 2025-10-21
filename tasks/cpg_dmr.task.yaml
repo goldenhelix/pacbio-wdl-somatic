@@ -159,19 +159,18 @@ steps:
         fi
 
         # copy reference files to /scratch
-        cp "$REF_FASTA" /scratch/
-        cp "$REF_INDEX" /scratch/
+        echo "Copying reference files to /scratch..."
+        copy_with_progress "/scratch" "$REF_FASTA" "$REF_INDEX"
         LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
         LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
 
         # Copy input files to /scratch
-        cp "$TUMOR_PHASED_BAM" /scratch/
-        cp "$TUMOR_PHASED_BAM_INDEX" /scratch/
+        echo "Copying input files to /scratch..."
+        copy_with_progress "/scratch" "$TUMOR_PHASED_BAM" "$TUMOR_PHASED_BAM_INDEX"
         LOCAL_TUMOR_PHASED_BAM="/scratch/$(basename "$TUMOR_PHASED_BAM")"
         LOCAL_TUMOR_PHASED_BAM_INDEX="/scratch/$(basename "$TUMOR_PHASED_BAM_INDEX")"
         if [ -n "$normal_sample_name" ]; then
-          cp "$NORMAL_PHASED_BAM" /scratch/
-          cp "$NORMAL_PHASED_BAM_INDEX" /scratch/
+          copy_with_progress "/scratch" "$NORMAL_PHASED_BAM" "$NORMAL_PHASED_BAM_INDEX"
           LOCAL_NORMAL_PHASED_BAM="/scratch/$(basename "$NORMAL_PHASED_BAM")"
           LOCAL_NORMAL_PHASED_BAM_INDEX="/scratch/$(basename "$NORMAL_PHASED_BAM_INDEX")"
         fi
@@ -318,42 +317,53 @@ steps:
         fi
 
         # Copy output files to output folder
-        # Copy tumor CpG output files
-        cp "${tumor_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        echo "Copying CpG outputs..."
+        CPG_OUTPUT_FILES=()
         
-        # Copy normal CpG output files if available
-        if [ -n "$normal_sample_name" ]; then
-          cp "${normal_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+        # Copy tumor CpG output files
+        if [ -f "${tumor_sample_name}.combined.bed.gz" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.combined.bed.gz")
+        fi
+        if [ -f "${tumor_sample_name}.combined.bw" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.combined.bw")
+        fi
+        if [ -f "${tumor_sample_name}.hap1.bed.gz" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.hap1.bed.gz")
+        fi
+        if [ -f "${tumor_sample_name}.hap2.bed.gz" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.hap2.bed.gz")
+        fi
+        if [ -f "${tumor_sample_name}.hap1.bw" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.hap1.bw")
+        fi
+        if [ -f "${tumor_sample_name}.hap2.bw" ]; then
+          CPG_OUTPUT_FILES+=("${tumor_sample_name}.hap2.bw")
         fi
         
-        # Copy output files to output folder
-        echo "Copying CpG outputs..."
-        # Copy tumor CpG output files
-        cp "${tumor_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
-        cp "${tumor_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
-        
         # Copy normal CpG output files if available
         if [ -n "$normal_sample_name" ]; then
-          cp "${normal_sample_name}.combined.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.combined.bw" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap1.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap2.bed.gz" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap1.bw" "$output_folder/" 2>/dev/null || true
-          cp "${normal_sample_name}.hap2.bw" "$output_folder/" 2>/dev/null || true
+          if [ -f "${normal_sample_name}.combined.bed.gz" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.combined.bed.gz")
+          fi
+          if [ -f "${normal_sample_name}.combined.bw" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.combined.bw")
+          fi
+          if [ -f "${normal_sample_name}.hap1.bed.gz" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.hap1.bed.gz")
+          fi
+          if [ -f "${normal_sample_name}.hap2.bed.gz" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.hap2.bed.gz")
+          fi
+          if [ -f "${normal_sample_name}.hap1.bw" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.hap1.bw")
+          fi
+          if [ -f "${normal_sample_name}.hap2.bw" ]; then
+            CPG_OUTPUT_FILES+=("${normal_sample_name}.hap2.bw")
+          fi
+        fi
+        
+        if [ ${#CPG_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${CPG_OUTPUT_FILES[@]}"
         fi
         
         # Run DMR analysis
@@ -486,7 +496,9 @@ steps:
         echo "Copying DMR outputs..."
         # Parse DMR output to get the generated file path
         DMR_FILE=$(echo "$DMR_OUTPUT" | jq -r '.outputs["DSS_DMR.output_DMR"]')
-        cp "$DMR_FILE" "$output_folder/" 2>/dev/null || true
+        if [ -f "$DMR_FILE" ]; then
+          copy_with_progress "$output_folder" "$DMR_FILE"
+        fi
         
         # Copy pb-CpG-tools binary to cache for future use
         if [ "$cache_udocker_images" = true ]; then

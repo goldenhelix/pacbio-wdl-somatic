@@ -101,8 +101,7 @@ steps:
         
         # copy reference files to /scratch
         echo "Copying reference files to /scratch..."
-        cp "$REF_FASTA" /scratch/
-        cp "$REF_INDEX" /scratch/
+        copy_with_progress "/scratch" "$REF_FASTA" "$REF_INDEX"
         LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
         LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
 

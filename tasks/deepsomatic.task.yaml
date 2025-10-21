@@ -159,8 +159,8 @@ steps:
         fi
 
         # Copy reference files to /scratch
-        cp "$REF_FASTA" /scratch/
-        cp "$REF_INDEX" /scratch/
+        echo "Copying reference files to /scratch..."
+        copy_with_progress "/scratch" "$REF_FASTA" "$REF_INDEX"
         LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
         LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
 
@@ -182,8 +182,8 @@ steps:
         fi
 
         # Copy tumor BAM files to /scratch
-        cp "$tumor_aligned_bam" /scratch/
-        cp "$TUMOR_BAM_INDEX" /scratch/
+        echo "Copying tumor BAM files to /scratch..."
+        copy_with_progress "/scratch" "$tumor_aligned_bam" "$TUMOR_BAM_INDEX"
         LOCAL_TUMOR_BAM="/scratch/$(basename "$tumor_aligned_bam")"
         LOCAL_TUMOR_BAM_INDEX="/scratch/$(basename "$TUMOR_BAM_INDEX")"
 
@@ -198,8 +198,8 @@ steps:
             exit 1
           fi
 
-          cp "$normal_aligned_bam" /scratch/
-          cp "$NORMAL_BAM_INDEX" /scratch/
+          echo "Copying normal BAM files to /scratch..."
+          copy_with_progress "/scratch" "$normal_aligned_bam" "$NORMAL_BAM_INDEX"
           LOCAL_NORMAL_BAM="/scratch/$(basename "$normal_aligned_bam")"
           LOCAL_NORMAL_BAM_INDEX="/scratch/$(basename "$NORMAL_BAM_INDEX")"
         fi
@@ -379,17 +379,38 @@ steps:
 
         # Copy DeepSomatic outputs with standardized naming
         echo "Copying DeepSomatic outputs with standardized naming..."
-        cp "$LOCAL_DEEPSOMATIC_VCF" "${output_folder}/${tumor_sample_name}.deepsomatic.vcf.gz"
-        cp "${LOCAL_DEEPSOMATIC_VCF}.tbi" "${output_folder}/${tumor_sample_name}.deepsomatic.vcf.gz.tbi"
-        cp "$LOCAL_DEEPSOMATIC_GVCF" "${output_folder}/${tumor_sample_name}.deepsomatic.g.vcf.gz"
-        cp "${LOCAL_DEEPSOMATIC_GVCF}.tbi" "${output_folder}/${tumor_sample_name}.deepsomatic.g.vcf.gz.tbi"
-        cp "$LOCAL_CLAIR3_TUMOR_VCF" "${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
-        cp "${LOCAL_CLAIR3_TUMOR_VCF}.tbi" "${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz.tbi"
+        DEEPSOMATIC_OUTPUT_FILES=()
+        if [ -f "$LOCAL_DEEPSOMATIC_VCF" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_DEEPSOMATIC_VCF")
+        fi
+        if [ -f "${LOCAL_DEEPSOMATIC_VCF}.tbi" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_DEEPSOMATIC_VCF}.tbi")
+        fi
+        if [ -f "$LOCAL_DEEPSOMATIC_GVCF" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_DEEPSOMATIC_GVCF")
+        fi
+        if [ -f "${LOCAL_DEEPSOMATIC_GVCF}.tbi" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_DEEPSOMATIC_GVCF}.tbi")
+        fi
+        if [ -f "$LOCAL_CLAIR3_TUMOR_VCF" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_CLAIR3_TUMOR_VCF")
+        fi
+        if [ -f "${LOCAL_CLAIR3_TUMOR_VCF}.tbi" ]; then
+          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_CLAIR3_TUMOR_VCF}.tbi")
+        fi
         
         # Copy normal Clair3 VCF with standardized naming if normal sample is provided
         if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
-          cp "$LOCAL_CLAIR3_NORMAL_VCF" "${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
-          cp "${LOCAL_CLAIR3_NORMAL_VCF}.tbi" "${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz.tbi"
+          if [ -f "$LOCAL_CLAIR3_NORMAL_VCF" ]; then
+            DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_CLAIR3_NORMAL_VCF")
+          fi
+          if [ -f "${LOCAL_CLAIR3_NORMAL_VCF}.tbi" ]; then
+            DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_CLAIR3_NORMAL_VCF}.tbi")
+          fi
+        fi
+        
+        if [ ${#DEEPSOMATIC_OUTPUT_FILES[@]} -gt 0 ]; then
+          copy_with_progress "$output_folder" "${DEEPSOMATIC_OUTPUT_FILES[@]}"
         fi
 
         # Run mutational pattern analysis
