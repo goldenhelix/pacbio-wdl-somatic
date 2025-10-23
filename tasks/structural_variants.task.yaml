@@ -223,22 +223,7 @@ steps:
           SEVERUS_ALL_VCF="$SEVERUS_ALL_VCF"
           SEVERUS_SV_VCF="$SEVERUS_OUTPUT_VCF"  # This is needed for downstream steps
           SEVERUS_OUTPUT='{"outputs":{"Severus_sv.output_vcf":"'$SEVERUS_OUTPUT_VCF'","Severus_sv.output_all_vcf":"'$SEVERUS_ALL_VCF'"}}'
-          
-          # Copy Severus outputs immediately after completion
-          echo "Copying Severus outputs..."
-          SEVERUS_OUTPUT_FILES=()
-          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
-            # Rename to include sample name prefix
-            SEVERUS_RENAMED_SOMATIC="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
-            cp "$SEVERUS_SOMATIC_VCF" "$SEVERUS_RENAMED_SOMATIC"
-            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_SOMATIC")
-          fi
-          if [ -f "$SEVERUS_ALL_VCF" ]; then
-            # Rename to include sample name prefix
-            SEVERUS_RENAMED_ALL="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
-            cp "$SEVERUS_ALL_VCF" "$SEVERUS_RENAMED_ALL"
-            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_ALL")
-          fi
+
           if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
             echo "Severus outputs copied with sample name prefix"
           fi
@@ -375,6 +360,95 @@ steps:
             echo "Severus outputs copied with sample name prefix"
           fi
         fi
+
+        # Fix Severus VCF sample names and create indices
+        echo "*************************"
+        echo "Fixing Severus VCF sample names and creating indices..."
+        echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
+        echo "*************************"
+        
+        # Process Severus somatic VCF
+        SEVERUS_SOMATIC_FIXED="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+        if [ -f "$SEVERUS_SOMATIC_FIXED" ]; then
+          echo "Processing Severus somatic VCF: $(basename "$SEVERUS_SOMATIC_FIXED")"
+          
+          # Check if sample names need fixing
+          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_SOMATIC_FIXED" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
+          NEEDS_FIXING=$(echo "$NEEDS_FIXING" | tr -d '\n\r')
+          
+          if [ "$NEEDS_FIXING" -gt 0 ]; then
+            echo "  - Sample names need fixing, processing..."
+            
+            # Create temporary file for processing
+            SEVERUS_SOMATIC_TEMP="/scratch/$(basename "$SEVERUS_SOMATIC_FIXED").temp"
+            
+            # Fix sample names (remove .hiphase suffix)
+            sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" "$SEVERUS_SOMATIC_FIXED" > "$SEVERUS_SOMATIC_TEMP"
+            
+            # Compress and replace original file
+            bgzip -c "$SEVERUS_SOMATIC_TEMP" > "$SEVERUS_SOMATIC_FIXED"
+            rm -f "$SEVERUS_SOMATIC_TEMP"
+            
+            echo "  - Sample names fixed"
+          else
+            echo "  - Sample names already correct"
+          fi
+          
+          # Create TBI index (check if it doesn't already exist)
+          if [ ! -f "${SEVERUS_SOMATIC_FIXED}.tbi" ]; then
+            tabix -p vcf "$SEVERUS_SOMATIC_FIXED"
+            echo "  - Created TBI index"
+          else
+            echo "  - TBI index already exists"
+          fi
+        fi
+        
+        # Process Severus all VCF
+        SEVERUS_ALL_FIXED="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
+        if [ -f "$SEVERUS_ALL_FIXED" ]; then
+          echo "Processing Severus all VCF: $(basename "$SEVERUS_ALL_FIXED")"
+          
+          # Check if sample names need fixing
+          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_ALL_FIXED" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
+          NEEDS_FIXING=$(echo "$NEEDS_FIXING" | tr -d '\n\r')
+          
+          if [ "$NEEDS_FIXING" -gt 0 ]; then
+            echo "  - Sample names need fixing, processing..."
+            
+            # Create temporary file for processing
+            SEVERUS_ALL_TEMP="/scratch/$(basename "$SEVERUS_ALL_FIXED").temp"
+            
+            # Fix sample names (remove .hiphase suffix from both tumor and normal samples)
+            if [ -n "${normal_sample_name}" ]; then
+              sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g; s/${normal_sample_name}\.hiphase/${normal_sample_name}/g" "$SEVERUS_ALL_FIXED" > "$SEVERUS_ALL_TEMP"
+            else
+              sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" "$SEVERUS_ALL_FIXED" > "$SEVERUS_ALL_TEMP"
+            fi
+            
+            # Compress and replace original file
+            bgzip -c "$SEVERUS_ALL_TEMP" > "$SEVERUS_ALL_FIXED"
+            rm -f "$SEVERUS_ALL_TEMP"
+            
+            echo "  - Sample names fixed"
+          else
+            echo "  - Sample names already correct"
+          fi
+          
+          # Create TBI index (check if it doesn't already exist)
+          if [ ! -f "${SEVERUS_ALL_FIXED}.tbi" ]; then
+            tabix -p vcf "$SEVERUS_ALL_FIXED"
+            echo "  - Created TBI index"
+          else
+            echo "  - TBI index already exists"
+          fi
+        fi
+        
+        # Update variables to point to the fixed VCFs for downstream steps
+        if [ -f "$SEVERUS_SOMATIC_FIXED" ]; then
+          SEVERUS_SV_VCF="$SEVERUS_SOMATIC_FIXED"  # Update for downstream steps
+        fi
+        
+        echo "Severus VCF processing completed successfully"
       
         # Wakhan:
         # - Tumor BAM

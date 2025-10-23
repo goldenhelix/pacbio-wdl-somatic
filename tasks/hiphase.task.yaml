@@ -430,6 +430,33 @@ steps:
           cp -r /scratch/hiphase-v1.5.0-x86_64-unknown-linux-gnu "${WORKSPACE_DIR}/${RESOURCES_PATH}/hiphase_cache/" 2>/dev/null || true
         fi
         
+
+        # Remove input files from input folder (Redundant and expensive to keep)
+        echo "Removing input files from input folder..."
+        {
+          rm -f "$input_dir/$(basename "$tumor_aligned_bam")"
+          rm -f "$input_dir/$(basename "$tumor_aligned_bam_index")"
+          rm -f "$input_dir/$(basename "$tumor_clair3_vcf")"
+          rm -f "$input_dir/$(basename "$tumor_clair3_vcf_index")"
+          rm -f "$input_dir/$(basename "$deepsomatic_vcf")"
+        } || { 
+          echo "Error: Failed to remove input files from input folder"
+          exit 1
+        }
+
+        if [ -n "$normal_sample_name" ]; then
+          {
+            rm -f "$input_dir/$(basename "$normal_aligned_bam")"
+            rm -f "$input_dir/$(basename "$normal_aligned_bam_index")"
+            rm -f "$input_dir/$(basename "$normal_clair3_vcf")"
+            rm -f "$input_dir/$(basename "$normal_clair3_vcf_index")"
+          } || {
+            echo "Error: Failed to remove input files from input folder"
+            exit 1
+          }
+        fi
+
+
         echo "*************************"
         echo "HiPhase VCF phasing and BAM haplotagging completed successfully"
         echo "Output files copied to: $output_folder"
