@@ -95,49 +95,101 @@ steps:
         # Handle somatic or family case
         case "$sample_type" in 
             "Somatic")
+                # Track samples that have been processed
+                declare -A processed_tumors
+                declare -A used_normals
+                
+                echo "================================================"
+                echo "PASS 1: Processing tumor samples with matched normals from catalog"
+                echo "================================================"
+                
+                # First pass: Process samples marked as "Tumor" in catalog with a matched normal
                 for sample_name in $sample_names; do
-
-                    # Check if sample is in catalog
+                    echo "Looking up sample: $sample_name...."
                     
-                    # Check if sample is a tumor sample
-                    tumor_sample=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Tumor" | tail -n 1 | tr -d '\r\n\t ')
+                    # Check if sample is marked as tumor in catalog
+                    tumor_status=$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="Tumor" | tail -n 1 | tr -d '\r\n\t ')
                     
-                    case "$tumor_sample" in
-                        "")
-                            echo "Sample $sample_name not found in catalog, assuming tumor only"
-                            ;;
-                        "Tumor")
-                            echo "Sample $sample_name is a tumor sample; adding to batch parameter file"
-                            ;;
-                        "Normal")
-                            echo "Sample $sample_name is a normal sample; skipping sample"
-                            continue
-                            ;;
-                        *)
-                            echo "Sample $sample_name is specified as normal, assuming tumor only"
-                            ;;
-                    esac
-
-                    # Add sample to batch parameter file
-                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}.aligned.bam" -o -name "${sample_name}.aligned.cram" \) | head -n 1)
-                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
-
-                    if [ -z "$sample_bam" ]; then
-                        echo "${sample_name}.aligned.bam not found in $input_folder"
+                    # Only process if explicitly marked as "Tumor"
+                    if [ "$tumor_status" != "Tumor" ]; then
                         continue
                     fi
-
-                    # First, look up normal sample
+                    
+                    echo "  ✓ Sample $sample_name is marked as Tumor in catalog"
+                    
+                    # Look up matched normal sample
                     normal_sample_name="$(gautil client catalog-export SampleCatalog Sample:eq:"$sample_name" --fields="NormalSample" | tail -n 1 | tr -d '\r\n\t ')"
+                    
                     if [ -z "$normal_sample_name" ]; then
-                        echo "$sample_name,,$sample_abs," >> "$output_file"
-                    else
-                        normal_sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${normal_sample_name}.aligned.bam" -o -name "${normal_sample_name}.aligned.cram" \) | head -n 1)
-                        normal_sample_abs=$(echo "$normal_sample_bam" | sed "s|^$WORKSPACE_DIR||")
-                        echo "$sample_name,$normal_sample_name,$sample_abs,$normal_sample_abs" >> "$output_file"
+                        # No matched normal, will handle in second pass
+                        continue
                     fi
-
+                    
+                    echo "  ✓ Found matched normal: $normal_sample_name"
+                    
+                    # Find tumor BAM/CRAM file
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}.aligned.bam" -o -name "${sample_name}.aligned.cram" \) | head -n 1)
+                    if [ -z "$sample_bam" ]; then
+                        echo "  ✗ No BAM/CRAM file found for tumor sample $sample_name, skipping"
+                        continue
+                    fi
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Find normal BAM/CRAM file
+                    normal_sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${normal_sample_name}.aligned.bam" -o -name "${normal_sample_name}.aligned.cram" \) | head -n 1)
+                    if [ -z "$normal_sample_bam" ]; then
+                        echo "  ⚠ No BAM/CRAM file found for normal sample $normal_sample_name, treating as tumor-only"
+                        echo "$sample_name,,$sample_abs," >> "$output_file"
+                        processed_tumors["$sample_name"]=1
+                        continue
+                    fi
+                    normal_sample_abs=$(echo "$normal_sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Add tumor-normal pair
+                    echo "  ✓ Adding tumor-normal pair: $sample_name - $normal_sample_name"
+                    echo "$sample_name,$normal_sample_name,$sample_abs,$normal_sample_abs" >> "$output_file"
+                    
+                    # Track both tumor and normal samples so we don't process them again
+                    processed_tumors["$sample_name"]=1
+                    used_normals["$normal_sample_name"]=1
                 done
+                
+                echo ""
+                echo "================================================"
+                echo "PASS 2: Processing tumor-only samples"
+                echo "================================================"
+                
+                # Second pass: Process samples not already handled and not used as normals
+                for sample_name in $sample_names; do
+                    # Skip if this sample was already processed in pass 1
+                    if [ -n "${processed_tumors[$sample_name]:-}" ]; then
+                        echo "Skipping $sample_name (already processed in pass 1)"
+                        continue
+                    fi
+                    
+                    # Skip if this sample was used as a normal
+                    if [ -n "${used_normals[$sample_name]:-}" ]; then
+                        echo "Skipping $sample_name (used as normal in tumor-normal pair)"
+                        continue
+                    fi
+                    
+                    echo "Processing tumor-only sample: $sample_name...."
+                    
+                    # Find BAM/CRAM file
+                    sample_bam=$(find "$input_folder" -maxdepth 1 -type f \( -name "${sample_name}.aligned.bam" -o -name "${sample_name}.aligned.cram" \) | head -n 1)
+                    if [ -z "$sample_bam" ]; then
+                        echo "  ✗ No BAM/CRAM file found for sample $sample_name, skipping"
+                        continue
+                    fi
+                    sample_abs=$(echo "$sample_bam" | sed "s|^$WORKSPACE_DIR||")
+                    
+                    # Add as tumor-only
+                    echo "  ✓ Adding tumor-only sample: $sample_name"
+                    echo "$sample_name,,$sample_abs," >> "$output_file"
+                done
+                
+                echo ""
+                echo "================================================"
                 ;;
 
             "Family")

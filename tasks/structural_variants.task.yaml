@@ -223,6 +223,25 @@ steps:
           SEVERUS_ALL_VCF="$SEVERUS_ALL_VCF"
           SEVERUS_SV_VCF="$SEVERUS_OUTPUT_VCF"  # This is needed for downstream steps
           SEVERUS_OUTPUT='{"outputs":{"Severus_sv.output_vcf":"'$SEVERUS_OUTPUT_VCF'","Severus_sv.output_all_vcf":"'$SEVERUS_ALL_VCF'"}}'
+          
+          # Copy Severus outputs immediately after completion
+          echo "Copying Severus outputs..."
+          SEVERUS_OUTPUT_FILES=()
+          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_SOMATIC="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+            cp "$SEVERUS_SOMATIC_VCF" "$SEVERUS_RENAMED_SOMATIC"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_SOMATIC")
+          fi
+          if [ -f "$SEVERUS_ALL_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_ALL="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
+            cp "$SEVERUS_ALL_VCF" "$SEVERUS_RENAMED_ALL"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_ALL")
+          fi
+          if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
+            echo "Severus outputs copied with sample name prefix"
+          fi
         else
           echo "Severus outputs missing. Proceeding with Severus analysis..."
 
@@ -330,11 +349,31 @@ steps:
           
           if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
             echo "  - Somatic SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
+            SEVERUS_SV_VCF="$SEVERUS_SOMATIC_VCF" # needed for downstream steps
           fi
           if [ -f "$SEVERUS_ALL_VCF" ]; then
             echo "  - All SV VCF: $(basename "$SEVERUS_ALL_VCF") ($(format_file_size "$SEVERUS_ALL_VCF"))"
           fi
           echo "================================================"
+          
+          # Copy Severus outputs immediately after completion
+          echo "Copying Severus outputs..."
+          SEVERUS_OUTPUT_FILES=()
+          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_SOMATIC="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+            cp "$SEVERUS_SOMATIC_VCF" "$SEVERUS_RENAMED_SOMATIC"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_SOMATIC")
+          fi
+          if [ -f "$SEVERUS_ALL_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_ALL="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
+            cp "$SEVERUS_ALL_VCF" "$SEVERUS_RENAMED_ALL"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_ALL")
+          fi
+          if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
+            echo "Severus outputs copied with sample name prefix"
+          fi
         fi
       
         # Wakhan:
@@ -625,6 +664,28 @@ steps:
             echo "  - Cancer Genes Copy Number: ${tumor_sample_name}.cancer_genes_copynumber.bed ($(format_file_size "${tumor_sample_name}.cancer_genes_copynumber.bed"))"
           fi
           echo "================================================"
+          
+          # Copy Wakhan outputs immediately after completion
+          echo "Copying Wakhan outputs..."
+          WAKHAN_OUTPUT_FILES=()
+          if [ -f "${tumor_sample_name}_wakhan.tar.gz" ]; then
+            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}_wakhan.tar.gz")
+          fi
+          if [ -f "purity_ploidy.tsv" ]; then
+            WAKHAN_OUTPUT_FILES+=("purity_ploidy.tsv")
+          fi
+          if [ -f "${tumor_sample_name}.copynumbers_segments.bed" ]; then
+            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.copynumbers_segments.bed")
+          fi
+          if [ -f "${tumor_sample_name}.loh_regions.bed" ]; then
+            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.loh_regions.bed")
+          fi
+          if [ -f "${tumor_sample_name}.cancer_genes_copynumber.bed" ]; then
+            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.cancer_genes_copynumber.bed")
+          fi
+          if [ ${#WAKHAN_OUTPUT_FILES[@]} -gt 0 ]; then
+            copy_with_progress "$output_folder" "${WAKHAN_OUTPUT_FILES[@]}"
+          fi
         fi
        
         # Chord HRD:
@@ -650,6 +711,8 @@ steps:
           CHORD_HRD_OUTPUT='{"outputs":{"chord_hrd.chord_log":"'$CHORD_HRD_LOG'","chord_hrd.chord_prediction":"'$CHORD_HRD_PREDICTION'","chord_hrd.chord_signature":"'$CHORD_HRD_SIGNATURE'"}}'
         else
           echo "Chord HRD outputs missing. Proceeding with Chord HRD analysis..."
+
+          
 
           # Pre-execution logging for Chord HRD
           echo "================================================"
@@ -749,6 +812,22 @@ steps:
             echo "  - HRD Signature: $(basename "$CHORD_HRD_SIGNATURE") ($(format_file_size "$CHORD_HRD_SIGNATURE"))"
           fi
           echo "================================================"
+          
+          # Copy Chord HRD outputs immediately after completion
+          echo "Copying Chord HRD outputs..."
+          CHORD_OUTPUT_FILES=()
+          if [ -n "$CHORD_HRD_LOG" ] && [ "$CHORD_HRD_LOG" != "null" ] && [ -f "$CHORD_HRD_LOG" ]; then
+            CHORD_OUTPUT_FILES+=("$CHORD_HRD_LOG")
+          fi
+          if [ -n "$CHORD_HRD_PREDICTION" ] && [ "$CHORD_HRD_PREDICTION" != "null" ] && [ -f "$CHORD_HRD_PREDICTION" ]; then
+            CHORD_OUTPUT_FILES+=("$CHORD_HRD_PREDICTION")
+          fi
+          if [ -n "$CHORD_HRD_SIGNATURE" ] && [ "$CHORD_HRD_SIGNATURE" != "null" ] && [ -f "$CHORD_HRD_SIGNATURE" ]; then
+            CHORD_OUTPUT_FILES+=("$CHORD_HRD_SIGNATURE")
+          fi
+          if [ ${#CHORD_OUTPUT_FILES[@]} -gt 0 ]; then
+            copy_with_progress "$output_folder" "${CHORD_OUTPUT_FILES[@]}"
+          fi
           
           echo "Chord HRD output: $CHORD_HRD_OUTPUT"
           echo "Chord HRD completed successfully"
@@ -901,78 +980,25 @@ steps:
           fi
           echo "================================================"
           
+          # Copy CNVKit outputs immediately after completion
+          echo "Copying CNVKit outputs..."
+          CNVKIT_FILES=$(echo "$CNVKIT_OUTPUT" | jq -r '.outputs["cnvkit_tumor.cnvkit_output"] | join(" ")')
+          if [ -n "$CNVKIT_FILES" ] && [ "$CNVKIT_FILES" != "null" ]; then
+            CNVKIT_OUTPUT_FILES=()
+            for file in $CNVKIT_FILES; do
+              if [ -f "$file" ]; then
+                CNVKIT_OUTPUT_FILES+=("$file")
+              fi
+            done
+            if [ ${#CNVKIT_OUTPUT_FILES[@]} -gt 0 ]; then
+              copy_with_progress "$output_folder" "${CNVKIT_OUTPUT_FILES[@]}"
+            fi
+          else
+            echo "Warning: CNVKit output files not found in results"
+          fi
+          
           echo "CNVKit output: $CNVKIT_OUTPUT"
         fi
 
         echo "Structural variant analysis completed successfully"
-        echo "Copying output files to $output_folder..."
-
-        # Copy Severus outputs
-        echo "Copying Severus outputs..."
-        SEVERUS_OUTPUT_FILES=()
-        if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
-          SEVERUS_OUTPUT_FILES+=("$SEVERUS_SOMATIC_VCF")
-        fi
-        if [ -f "$SEVERUS_ALL_VCF" ]; then
-          SEVERUS_OUTPUT_FILES+=("$SEVERUS_ALL_VCF")
-        fi
-        if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
-          copy_with_progress "$output_folder" "${SEVERUS_OUTPUT_FILES[@]}"
-        fi
-
-        # Copy Wakhan outputs
-        echo "Copying Wakhan outputs..."
-        WAKHAN_OUTPUT_FILES=()
-        if [ -f "${tumor_sample_name}_wakhan.tar.gz" ]; then
-          WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}_wakhan.tar.gz")
-        fi
-        if [ -f "purity_ploidy.tsv" ]; then
-          WAKHAN_OUTPUT_FILES+=("purity_ploidy.tsv")
-        fi
-        if [ -f "${tumor_sample_name}.copynumbers_segments.bed" ]; then
-          WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.copynumbers_segments.bed")
-        fi
-        if [ -f "${tumor_sample_name}.loh_regions.bed" ]; then
-          WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.loh_regions.bed")
-        fi
-        if [ -f "${tumor_sample_name}.cancer_genes_copynumber.bed" ]; then
-          WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.cancer_genes_copynumber.bed")
-        fi
-        if [ ${#WAKHAN_OUTPUT_FILES[@]} -gt 0 ]; then
-          copy_with_progress "$output_folder" "${WAKHAN_OUTPUT_FILES[@]}"
-        fi
-
-        # Copy Chord HRD outputs
-        echo "Copying Chord HRD outputs..."
-        CHORD_OUTPUT_FILES=()
-        if [ -n "$CHORD_HRD_LOG" ] && [ "$CHORD_HRD_LOG" != "null" ] && [ -f "$CHORD_HRD_LOG" ]; then
-          CHORD_OUTPUT_FILES+=("$CHORD_HRD_LOG")
-        fi
-        if [ -n "$CHORD_HRD_PREDICTION" ] && [ "$CHORD_HRD_PREDICTION" != "null" ] && [ -f "$CHORD_HRD_PREDICTION" ]; then
-          CHORD_OUTPUT_FILES+=("$CHORD_HRD_PREDICTION")
-        fi
-        if [ -n "$CHORD_HRD_SIGNATURE" ] && [ "$CHORD_HRD_SIGNATURE" != "null" ] && [ -f "$CHORD_HRD_SIGNATURE" ]; then
-          CHORD_OUTPUT_FILES+=("$CHORD_HRD_SIGNATURE")
-        fi
-        if [ ${#CHORD_OUTPUT_FILES[@]} -gt 0 ]; then
-          copy_with_progress "$output_folder" "${CHORD_OUTPUT_FILES[@]}"
-        fi
-
-        # Copy CNVKit outputs
-        echo "Copying CNVKit outputs..."
-        CNVKIT_FILES=$(echo "$CNVKIT_OUTPUT" | jq -r '.outputs["cnvkit_tumor.cnvkit_output"] | join(" ")')
-        if [ -n "$CNVKIT_FILES" ] && [ "$CNVKIT_FILES" != "null" ]; then
-          CNVKIT_OUTPUT_FILES=()
-          for file in $CNVKIT_FILES; do
-            if [ -f "$file" ]; then
-              CNVKIT_OUTPUT_FILES+=("$file")
-            fi
-          done
-          if [ ${#CNVKIT_OUTPUT_FILES[@]} -gt 0 ]; then
-            copy_with_progress "$output_folder" "${CNVKIT_OUTPUT_FILES[@]}"
-          fi
-        else
-          echo "Warning: CNVKit output files not found in results"
-        fi
-
-        echo "All output files copied to: $output_folder"
+        echo "All output files have been copied to: $output_folder"

@@ -29,7 +29,23 @@ This repository provides a comprehensive PacBio HiFi somatic analysis workflow t
 
 ### Input Requirements
 
-The workflow expects PacBio HiFi unaligned BAM (uBAM) files in the input directory. Files should follow the naming pattern `*/*.bam` where the sample identifier is extracted from the filename. The workflow automatically pairs tumor and normal samples based on catalog information.
+The workflow expects PacBio HiFi unaligned BAM (uBAM) files organized in subdirectories within the input directory. The **sample identifier is extracted from the folder name** containing the BAM files, not from the BAM file names themselves.
+
+**Key points:**
+- Input structure: `SampleName/UnalignedReads.bam`
+- Multiple uBAM files per sample are supported (e.g., when reads are split across multiple files)
+- If multiple uBAM files are present in a sample folder, they will be aligned and merged together automatically
+- The names of the BAM files themselves do not matter
+- All output files will be named based on the containing folder name
+
+The workflow automatically pairs tumor and normal samples based on records in the SampleCatalog.
+
+For example, if a sample COL123 had a paired normal COL123-Blood, the sample COL123 should be added to the SampleCatalog with the "Tumor" field set to "Tumor", and the "Normal Sample" field set to "COL123-Blood". After alignment, samples are queried in the catalog with the following matching behavior:
+
+ - If a sample is marked as **"Tumor"** with a matched normal sample defined, it is processed as a tumor-normal pair for somatic variant calling with DeepSomatic
+ - If a sample is marked as **"Tumor"** with no matched normal sample defined, it is processed as tumor-only variant calling
+ - If a sample is not found in the catalog, it is processed as tumor-only variant calling
+ - If a sample is used as a matched normal for another tumor sample, it is not processed independently for variant calling
 
 ### Output Structure
 
