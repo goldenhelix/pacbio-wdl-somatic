@@ -224,9 +224,6 @@ steps:
           SEVERUS_SV_VCF="$SEVERUS_OUTPUT_VCF"  # This is needed for downstream steps
           SEVERUS_OUTPUT='{"outputs":{"Severus_sv.output_vcf":"'$SEVERUS_OUTPUT_VCF'","Severus_sv.output_all_vcf":"'$SEVERUS_ALL_VCF'"}}'
 
-          if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
-            echo "Severus outputs copied with sample name prefix"
-          fi
         else
           echo "Severus outputs missing. Proceeding with Severus analysis..."
 
@@ -768,21 +765,18 @@ steps:
 
         # Check if Chord HRD outputs already exist
         echo "Checking if Chord HRD outputs already exist..."
-        CHORD_LOG_FILES=$(find "$output_folder" -name "*.log" 2>/dev/null | wc -l)
-        CHORD_PREDICTION_FILES=$(find "$output_folder" -name "*.prediction" 2>/dev/null | wc -l)
-        CHORD_SIGNATURE_FILES=$(find "$output_folder" -name "*.signature" 2>/dev/null | wc -l)
+        CHORD_LOG_FILES="${output_folder}/chord_hrd.log"
+        CHORD_PREDICTION_FILES="${output_folder}/${tumor_sample_name}_chord_prediction.txt"
+        CHORD_SIGNATURE_FILES="${output_folder}/${tumor_sample_name}_chord_signatures.txt"
         
-        if [ $CHORD_LOG_FILES -gt 0 ] && [ $CHORD_PREDICTION_FILES -gt 0 ] && [ $CHORD_SIGNATURE_FILES -gt 0 ]; then
+        if [ -f "$CHORD_LOG_FILES" ] && [ -f "$CHORD_PREDICTION_FILES" ] && [ -f "$CHORD_SIGNATURE_FILES" ]; then
           echo "Chord HRD outputs already exist. Skipping Chord HRD step."
-          echo "  - Found $CHORD_LOG_FILES log files"
-          echo "  - Found $CHORD_PREDICTION_FILES prediction files"
-          echo "  - Found $CHORD_SIGNATURE_FILES signature files"
+          echo "  - HRD Log: $(basename "$CHORD_LOG_FILES") ($(format_file_size "$CHORD_LOG_FILES"))"
+          echo "  - HRD Prediction: $(basename "$CHORD_PREDICTION_FILES") ($(format_file_size "$CHORD_PREDICTION_FILES"))"
+          echo "  - HRD Signature: $(basename "$CHORD_SIGNATURE_FILES") ($(format_file_size "$CHORD_SIGNATURE_FILES"))"
           
           # Set variables to simulate successful completion for downstream steps
-          CHORD_HRD_LOG=$(find "$output_folder" -name "*.log" 2>/dev/null | head -n 1)
-          CHORD_HRD_PREDICTION=$(find "$output_folder" -name "*.prediction" 2>/dev/null | head -n 1)
-          CHORD_HRD_SIGNATURE=$(find "$output_folder" -name "*.signature" 2>/dev/null | head -n 1)
-          CHORD_HRD_OUTPUT='{"outputs":{"chord_hrd.chord_log":"'$CHORD_HRD_LOG'","chord_hrd.chord_prediction":"'$CHORD_HRD_PREDICTION'","chord_hrd.chord_signature":"'$CHORD_HRD_SIGNATURE'"}}'
+          CHORD_HRD_OUTPUT='{"outputs":{"chord_hrd.chord_log":"'$CHORD_LOG_FILES'","chord_hrd.chord_prediction":"'$CHORD_PREDICTION_FILES'","chord_hrd.chord_signature":"'$CHORD_SIGNATURE_FILES'"}}'
         else
           echo "Chord HRD outputs missing. Proceeding with Chord HRD analysis..."
 
@@ -918,21 +912,18 @@ steps:
 
         # Check if CNVKit outputs already exist
         echo "Checking if CNVKit outputs already exist..."
-        CNVKIT_CNR_FILES=$(find "$output_folder" -name "*.cnr" 2>/dev/null | wc -l)
-        CNVKIT_CNS_FILES=$(find "$output_folder" -name "*.cns" 2>/dev/null | wc -l)
-        CNVKIT_CALLS_FILES=$(find "$output_folder" -name "*.calls" 2>/dev/null | wc -l)
+        CNVKIT_CNS_FILE="${output_folder}/${tumor_sample_name}.cnvkit.call.cns"
+        CNVKIT_DIAGRAM_FILE="${output_folder}/${tumor_sample_name}.cnvkit-diagram.pdf"
+        CNVKIT_SCATTER_FILE="${output_folder}/${tumor_sample_name}.cnvkit-scatter.png"
         
-        if [ $CNVKIT_CNR_FILES -gt 0 ] && [ $CNVKIT_CNS_FILES -gt 0 ] && [ $CNVKIT_CALLS_FILES -gt 0 ]; then
+        if [ -f "$CNVKIT_CNS_FILE" ] && [ -f "$CNVKIT_DIAGRAM_FILE" ] && [ -f "$CNVKIT_SCATTER_FILE" ]; then
           echo "CNVKit outputs already exist. Skipping CNVKit step."
-          echo "  - Found $CNVKIT_CNR_FILES CNR files"
-          echo "  - Found $CNVKIT_CNS_FILES CNS files"
-          echo "  - Found $CNVKIT_CALLS_FILES calls files"
+          echo "  - CNS File: $(basename "$CNVKIT_CNS_FILE") ($(format_file_size "$CNVKIT_CNS_FILE"))"
+          echo "  - Diagram PDF: $(basename "$CNVKIT_DIAGRAM_FILE") ($(format_file_size "$CNVKIT_DIAGRAM_FILE"))"
+          echo "  - Scatter PNG: $(basename "$CNVKIT_SCATTER_FILE") ($(format_file_size "$CNVKIT_SCATTER_FILE"))"
           
           # Set variables to simulate successful completion for downstream steps
-          CNVKIT_CNR=$(find "$output_folder" -name "*.cnr" 2>/dev/null | head -n 1)
-          CNVKIT_CNS=$(find "$output_folder" -name "*.cns" 2>/dev/null | head -n 1)
-          CNVKIT_CALLS=$(find "$output_folder" -name "*.calls" 2>/dev/null | head -n 1)
-          CNVKIT_OUTPUT='{"outputs":{"cnvkit_tumor.cnr":"'$CNVKIT_CNR'","cnvkit_tumor.cns":"'$CNVKIT_CNS'","cnvkit_tumor.calls":"'$CNVKIT_CALLS'"}}'
+          CNVKIT_OUTPUT='{"outputs":{"cnvkit_tumor.cnr":"'$CNVKIT_CNS_FILE'","cnvkit_tumor.cns":"'$CNVKIT_CNS_FILE'","cnvkit_tumor.calls":"'$CNVKIT_CNS_FILE'"}}'
         else
           echo "CNVKit outputs missing. Proceeding with CNVKit analysis..."
 
@@ -1061,7 +1052,24 @@ steps:
             CNVKIT_OUTPUT_FILES=()
             for file in $CNVKIT_FILES; do
               if [ -f "$file" ]; then
-                CNVKIT_OUTPUT_FILES+=("$file")
+                # Extract filename and check if it's one of our target files
+                filename=$(basename "$file")
+                if [[ "$filename" == *".call.cns" ]] || [[ "$filename" == *"-diagram.pdf" ]] || [[ "$filename" == *"-scatter.png" ]]; then
+                  # Rename the file to replace anything between sample name and suffix with `cnvkit`
+                  # Handle different file patterns: .call.cns, -diagram.pdf, -scatter.png
+                  if [[ "$filename" == *".call.cns" ]]; then
+                    new_file=$(echo "$file" | sed "s/${tumor_sample_name}\.[^.]*/${tumor_sample_name}.cnvkit/")
+                  elif [[ "$filename" == *"-diagram.pdf" ]]; then
+                    new_file=$(echo "$file" | sed "s/${tumor_sample_name}[^-]*-/${tumor_sample_name}.cnvkit-/")
+                  elif [[ "$filename" == *"-scatter.png" ]]; then
+                    new_file=$(echo "$file" | sed "s/${tumor_sample_name}[^-]*-/${tumor_sample_name}.cnvkit-/")
+                  fi
+                  mv "$file" "$new_file"
+                  echo "Renamed $file to $new_file"
+                  CNVKIT_OUTPUT_FILES+=("$new_file")
+                else
+                  echo "Skipping intermediate file: $filename"
+                fi
               fi
             done
             if [ ${#CNVKIT_OUTPUT_FILES[@]} -gt 0 ]; then
