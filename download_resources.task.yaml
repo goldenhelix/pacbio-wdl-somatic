@@ -32,6 +32,11 @@ steps:
           echo "Please update the RESOURCES_PATH in Workspace Settings to point to a valid directory that can be used to download the reference and then re-run this task"
           exit 1
         fi
+        mkdir -p "$BASE_DIR/hifisomatic_resources"
+        if [ ! -d "$BASE_DIR/hifisomatic_resources" ]; then
+          echo "Unable to create directory $BASE_DIR/hifisomatic_resources"
+          exit 1
+        fi
 
         echo "Starting PacBio Somatic WDL resources download..."
         echo "Base directory: $BASE_DIR"
