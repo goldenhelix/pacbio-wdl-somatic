@@ -2,6 +2,14 @@
 
 This repository contains workflows for PacBio HiFi (High-Fidelity) somatic variant analysis based on the [PacificBiosciences/HiFi-somatic-WDL](https://github.com/PacificBiosciences/HiFi-somatic-WDL) pipeline. This comprehensive pipeline provides end-to-end analysis of PacBio HiFi reads for somatic variant detection, including alignment, variant calling, structural variant detection, phasing, and methylation analysis.
 
+## VSPipeline Resources (Submodule)
+
+VSPipeline tasks (Generate VSBatch, Create VarSeq Project) and the shared `vspipeline_utilities.py` script are provided by the **vspipeline-resources** submodule. After cloning this repository, initialize the submodule:
+
+```bash
+git submodule update --init --recursive
+```
+
 ## Prerequisite
 
 **IMPORTANT**: Before running any workflows, you must first run the **Download PacBio Somatic WDL Reference Data Resources** task to download and prepare the required reference data bundle. This task downloads the GRCh38 reference genome and associated files from Zenodo and configures the necessary mapping files.

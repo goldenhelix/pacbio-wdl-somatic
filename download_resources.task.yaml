@@ -42,7 +42,30 @@ steps:
         echo "Base directory: $BASE_DIR"
 
         cd /scratch
-        curl --silent -L https://zenodo.org/record/17043964/files/hifisomatic_resources.tar.gz | tar --no-same-owner -m -xzf - -C "$BASE_DIR"
+        TEMP_EXTRACT_DIR=$(mktemp -d)
+        curl --silent -L https://zenodo.org/record/17043964/files/hifisomatic_resources.tar.gz | tar --no-same-owner -m -xzf - -C "$TEMP_EXTRACT_DIR"
+        
+        # Move contents from extracted directory to target location
+        EXTRACTED_DIR=$(find "$TEMP_EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+        if [ -n "$EXTRACTED_DIR" ]; then
+          mv "$EXTRACTED_DIR"/* "$BASE_DIR/hifisomatic_resources/" 2>/dev/null || true
+          mv "$EXTRACTED_DIR"/.[!.]* "$BASE_DIR/hifisomatic_resources/" 2>/dev/null || true
+          rmdir "$EXTRACTED_DIR" 2>/dev/null || true
+        else
+          # If no subdirectory, move files directly
+          mv "$TEMP_EXTRACT_DIR"/* "$BASE_DIR/hifisomatic_resources/" 2>/dev/null || true
+          mv "$TEMP_EXTRACT_DIR"/.[!.]* "$BASE_DIR/hifisomatic_resources/" 2>/dev/null || true
+        fi
+        rmdir "$TEMP_EXTRACT_DIR"
+
+        echo ""
+        echo "Downloaded resources summary:"
+        echo "Location: $BASE_DIR/hifisomatic_resources"
+        echo "Total size: $(du -sh "$BASE_DIR/hifisomatic_resources" | cut -f1)"
+        echo ""
+        echo "Contents:"
+        ls -lh "$BASE_DIR/hifisomatic_resources"
+        echo ""
 
         find "$BASE_DIR/hifisomatic_resources" -name "*.tsv" -type f -exec sed -i "s|<prefix>|${BASE_DIR}|g" {} \;
         find "$BASE_DIR/hifisomatic_resources" -name "*.tsv" -type f -exec sed -i "s|\$WORKSPACE_DIR|${WORKSPACE_DIR}|g" {} \;

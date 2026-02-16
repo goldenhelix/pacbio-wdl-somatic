@@ -1,0 +1,3 @@
+[submodule "tasks/vspipeline-resources"]
+	path = tasks/vspipeline-resources
+	url = https://github.com/goldenhelix/vspipeline-resources.git

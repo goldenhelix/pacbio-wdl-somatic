@@ -33,6 +33,7 @@ steps:
     args:
       - |- # shell
         set -eu pipefail
+        source "$TASK_DIR/utils/utils.sh"
 
         echo "*************************"
         echo "Starting Mosdepth Task"
@@ -70,9 +71,6 @@ steps:
         else
           echo "Output files missing. Proceeding with analysis..."
         fi
-
-        # Source common utility functions
-        source "$TASK_DIR/utils/utils.sh"
 
         # Set up env variables for miniwdl
         export MINIWDL__SCHEDULER__CONTAINER_BACKEND=udocker

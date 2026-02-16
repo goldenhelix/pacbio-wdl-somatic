@@ -1,0 +1,56 @@
+name: Prepare Directories
+description: Prepare output directories
+auto_generate_session_for_account: "{workspaceBot}"
+
+parameters:
+  - name: input_tsv
+    label: Batch TSV File
+    type: file
+    pattern_match:
+      - '*.tsv'
+    help: "The batch file containing alignment files and their associated sample names."
+
+  - name: folder_name
+    label: Folder Name
+    type: string
+    optional: true
+    help: "The name of the output folder. If left blank, the name of the folder containing the batch TSV file will be used."
+
+  - name: base_output_folder
+    label: Base Output Folder
+    type: directory
+    supports_location_mode: 'no_append'
+    help: "The base output folder, where the output folder will be created, for the PacBio WGS Somatic analysis."
+
+agent_requirements:
+  cpu_cores: 0
+  memory_gb: 0
+
+steps:
+  - name: prepare_directories
+    description: Prepare output directories
+    type: cmd
+    args:
+      - |- # shell
+        set -eu pipefail
+
+        # If folder name is not provided, use the name of the folder containing the batch TSV file
+        if [ -z "$folder_name" ]; then
+            folder_name=$(dirname "$input_tsv")
+            folder_name=$(basename "$folder_name")
+        fi
+
+        # Create output directory
+        output_folder="$base_output_folder/$folder_name"
+        mkdir -p "$output_folder" || { echo "Failed to create output directory"; exit 1; }
+
+        echo "Output folder: $output_folder"
+
+        # Warn if output directory is not empty
+        if [ "$(ls -A "$output_folder")" ]; then
+            echo "WARNING: The output directory '$output_folder' is not empty."
+        fi
+
+        output_folder_rel="${output_folder#$WORKSPACE_DIR/}"
+        echo "output_folder=${output_folder_rel}" > result.env
+

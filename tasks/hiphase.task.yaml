@@ -423,6 +423,56 @@ steps:
         if [ ${#HIPHASE_OUTPUT_FILES[@]} -gt 0 ]; then
           copy_with_progress "$output_folder" "${HIPHASE_OUTPUT_FILES[@]}"
         fi
+
+        # Update vspipeline_inputs.json with phased VCF files
+        echo "Updating vspipeline_inputs.json..."
+        if ! command -v python3 &> /dev/null; then
+          echo "Warning: python3 not available, skipping vspipeline_inputs.json update"
+        else
+          # Add tumor phased Clair3 VCF to multiverse
+          TUMOR_PHASED_CLAIR3_VCF="${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz"
+          if [ -f "$TUMOR_PHASED_CLAIR3_VCF" ]; then
+            RELATIVE_PATH="${TUMOR_PHASED_CLAIR3_VCF#${WORKSPACE_DIR}/}"
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$tumor_sample_name" \
+              --file "$RELATIVE_PATH" \
+              --file_type multiverse \
+              --task_name hiphase \
+              --scratch_dir /scratch || \
+              { echo "Warning: Failed to update vspipeline_inputs.json for tumor Clair3 phased VCF, continuing..."; }
+          fi
+          
+          # Add tumor phased DeepSomatic VCF to multiverse
+          TUMOR_PHASED_DEEPSOMATIC_VCF="${output_folder}/${tumor_sample_name}.deepsomatic.phased.vcf.gz"
+          if [ -f "$TUMOR_PHASED_DEEPSOMATIC_VCF" ]; then
+            RELATIVE_PATH="${TUMOR_PHASED_DEEPSOMATIC_VCF#${WORKSPACE_DIR}/}"
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$tumor_sample_name" \
+              --file "$RELATIVE_PATH" \
+              --file_type multiverse \
+              --task_name hiphase \
+              --scratch_dir /scratch || \
+              { echo "Warning: Failed to update vspipeline_inputs.json for tumor DeepSomatic phased VCF, continuing..."; }
+          fi
+          
+          # Add normal phased Clair3 VCF to multiverse if normal sample is provided
+          if [ -n "$normal_sample_name" ]; then
+            NORMAL_PHASED_CLAIR3_VCF="${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.phased.vcf.gz"
+            if [ -f "$NORMAL_PHASED_CLAIR3_VCF" ]; then
+              RELATIVE_PATH="${NORMAL_PHASED_CLAIR3_VCF#${WORKSPACE_DIR}/}"
+              python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+                --input_dir "$output_folder" \
+                --sample "$normal_sample_name" \
+                --file "$RELATIVE_PATH" \
+                --file_type multiverse \
+                --task_name hiphase \
+                --scratch_dir /scratch || \
+                { echo "Warning: Failed to update vspipeline_inputs.json for normal Clair3 phased VCF, continuing..."; }
+            fi
+          fi
+        fi
         
         # Copy HiPhase binary to cache for future use
         if [ "$cache_udocker_images" = true ]; then
@@ -439,6 +489,7 @@ steps:
           rm -f "$input_dir/$(basename "$tumor_clair3_vcf")"
           rm -f "$input_dir/$(basename "$tumor_clair3_vcf_index")"
           rm -f "$input_dir/$(basename "$deepsomatic_vcf")"
+          rm -f "$input_dir/$(basename "$deepsomatic_vcf_index")"
         } || { 
           echo "Error: Failed to remove input files from input folder"
           exit 1

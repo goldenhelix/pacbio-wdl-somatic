@@ -377,36 +377,74 @@ steps:
           LOCAL_CLAIR3_NORMAL_VCF=$(echo "$MINIWDL_OUTPUT" | jq -r '.outputs."run_deepsomatic.clair3_normal_vcf"')
         fi
 
+        # Rename deepsomatic files to use standardized naming (underscore to dot)
+        echo "Renaming deepsomatic files to standardized naming..."
+        
+        # Rename deepsomatic.vcf.gz
+        if [ -f "$LOCAL_DEEPSOMATIC_VCF" ]; then
+          LOCAL_DEEPSOMATIC_VCF_DIR=$(dirname "$LOCAL_DEEPSOMATIC_VCF")
+          LOCAL_DEEPSOMATIC_VCF_BASE=$(basename "$LOCAL_DEEPSOMATIC_VCF")
+          NEW_LOCAL_DEEPSOMATIC_VCF="${LOCAL_DEEPSOMATIC_VCF_DIR}/${tumor_sample_name}.deepsomatic.vcf.gz"
+          
+          if [ "$LOCAL_DEEPSOMATIC_VCF_BASE" != "${tumor_sample_name}.deepsomatic.vcf.gz" ]; then
+            echo "  - Renaming: $LOCAL_DEEPSOMATIC_VCF_BASE → ${tumor_sample_name}.deepsomatic.vcf.gz"
+            mv "$LOCAL_DEEPSOMATIC_VCF" "$NEW_LOCAL_DEEPSOMATIC_VCF"
+            LOCAL_DEEPSOMATIC_VCF="$NEW_LOCAL_DEEPSOMATIC_VCF"
+          fi
+        fi
+        
+        # Rename deepsomatic.g.vcf.gz
+        if [ -f "$LOCAL_DEEPSOMATIC_GVCF" ]; then
+          LOCAL_DEEPSOMATIC_GVCF_DIR=$(dirname "$LOCAL_DEEPSOMATIC_GVCF")
+          LOCAL_DEEPSOMATIC_GVCF_BASE=$(basename "$LOCAL_DEEPSOMATIC_GVCF")
+          NEW_LOCAL_DEEPSOMATIC_GVCF="${LOCAL_DEEPSOMATIC_GVCF_DIR}/${tumor_sample_name}.deepsomatic.g.vcf.gz"
+          
+          if [ "$LOCAL_DEEPSOMATIC_GVCF_BASE" != "${tumor_sample_name}.deepsomatic.g.vcf.gz" ]; then
+            echo "  - Renaming: $LOCAL_DEEPSOMATIC_GVCF_BASE → ${tumor_sample_name}.deepsomatic.g.vcf.gz"
+            mv "$LOCAL_DEEPSOMATIC_GVCF" "$NEW_LOCAL_DEEPSOMATIC_GVCF"
+            LOCAL_DEEPSOMATIC_GVCF="$NEW_LOCAL_DEEPSOMATIC_GVCF"
+          fi
+        fi
+
         # Copy DeepSomatic outputs with standardized naming
         echo "Copying DeepSomatic outputs with standardized naming..."
         DEEPSOMATIC_OUTPUT_FILES=()
-        if [ -f "$LOCAL_DEEPSOMATIC_VCF" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_DEEPSOMATIC_VCF")
-        fi
-        if [ -f "${LOCAL_DEEPSOMATIC_VCF}.tbi" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_DEEPSOMATIC_VCF}.tbi")
-        fi
-        if [ -f "$LOCAL_DEEPSOMATIC_GVCF" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_DEEPSOMATIC_GVCF")
-        fi
-        if [ -f "${LOCAL_DEEPSOMATIC_GVCF}.tbi" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_DEEPSOMATIC_GVCF}.tbi")
-        fi
-        if [ -f "$LOCAL_CLAIR3_TUMOR_VCF" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_CLAIR3_TUMOR_VCF")
-        fi
-        if [ -f "${LOCAL_CLAIR3_TUMOR_VCF}.tbi" ]; then
-          DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_CLAIR3_TUMOR_VCF}.tbi")
-        fi
+        
+        # Function to add VCF file and create/index if needed
+        add_vcf_with_index() {
+          local vcf_file="$1"
+          if [ -f "$vcf_file" ]; then
+            echo "  - Adding VCF: $(basename "$vcf_file")"
+            DEEPSOMATIC_OUTPUT_FILES+=("$vcf_file")
+            
+            # Check if index exists, create if needed
+            if [ ! -f "${vcf_file}.tbi" ]; then
+              echo "    Index missing, creating: $(basename "${vcf_file}.tbi")"
+              tabix -f -p vcf "$vcf_file" || { echo "    ⚠️  Warning: Failed to create index for $(basename "$vcf_file")"; if [ ! -f "${vcf_file}.tbi" ]; then echo "    Index file does not exist"; else echo "    Index file exists, continuing..."; fi; }
+            fi
+            
+            # Only add .tbi to list if it actually exists
+            if [ -f "${vcf_file}.tbi" ]; then
+              echo "    ✓ Adding index: $(basename "${vcf_file}.tbi")"
+              DEEPSOMATIC_OUTPUT_FILES+=("${vcf_file}.tbi")
+            else
+              echo "    ✗ Index file not available"
+            fi
+          fi
+        }
+        
+        # Add DeepSomatic VCF with index
+        add_vcf_with_index "$LOCAL_DEEPSOMATIC_VCF"
+        
+        # Add DeepSomatic GVCF with index
+        add_vcf_with_index "$LOCAL_DEEPSOMATIC_GVCF"
+        
+        # Add Clair3 tumor VCF with index
+        add_vcf_with_index "$LOCAL_CLAIR3_TUMOR_VCF"
         
         # Copy normal Clair3 VCF with standardized naming if normal sample is provided
         if [ "$NORMAL_SAMPLE_PROVIDED" = true ]; then
-          if [ -f "$LOCAL_CLAIR3_NORMAL_VCF" ]; then
-            DEEPSOMATIC_OUTPUT_FILES+=("$LOCAL_CLAIR3_NORMAL_VCF")
-          fi
-          if [ -f "${LOCAL_CLAIR3_NORMAL_VCF}.tbi" ]; then
-            DEEPSOMATIC_OUTPUT_FILES+=("${LOCAL_CLAIR3_NORMAL_VCF}.tbi")
-          fi
+          add_vcf_with_index "$LOCAL_CLAIR3_NORMAL_VCF"
         fi
         
         if [ ${#DEEPSOMATIC_OUTPUT_FILES[@]} -gt 0 ]; then
@@ -479,7 +517,69 @@ steps:
         done
         echo "================================================"
 
-        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "${tumor_sample_name}" > /dev/null 2>&1 
+        # Copy mutational pattern outputs from MiniWDL to output folder
+        echo "Copying mutational pattern outputs to $output_folder..."
+        if [ -f /scratch/_LAST/outputs.json ]; then
+          for key in mutationalpattern.mutsig_tsv mutationalpattern.recon_sig mutationalpattern.occurences_tsv mutationalpattern.mutsig_bootstrap mutationalpattern.mut_profile; do
+            src=$(jq -r --arg k "$key" '.[$k]' /scratch/_LAST/outputs.json 2>/dev/null)
+            if [ -n "$src" ] && [ "$src" != "null" ] && [ -f "$src" ]; then
+              cp "$src" "$output_folder/$(basename "$src")"
+              echo "  - Copied: $(basename "$src")"
+            fi
+          done
+          # Copy any additional .tsv from mutsig_output array
+          jq -r '.mutationalpattern.mutsig_output[]?' /scratch/_LAST/outputs.json 2>/dev/null | while read -r src; do
+            if [ -n "$src" ] && [ -f "$src" ]; then
+              cp "$src" "$output_folder/$(basename "$src")"
+              echo "  - Copied: $(basename "$src")"
+            fi
+          done
+        else
+          echo "Warning: outputs.json not found at /scratch/_LAST/outputs.json"
+        fi
+
+        # Update vspipeline_inputs.json with DeepSomatic and Clair3 VCF files
+        echo "Updating vspipeline_inputs.json..."
+        if command -v python3 &> /dev/null; then
+          DEEPSOMATIC_VCF="${output_folder}/${tumor_sample_name}.deepsomatic.vcf.gz"
+          if [ -f "$DEEPSOMATIC_VCF" ]; then
+            RELATIVE_PATH=$(echo "$DEEPSOMATIC_VCF" | sed "s|^${WORKSPACE_DIR}/||")
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$tumor_sample_name" \
+              --file "$RELATIVE_PATH" \
+              --file_type multiverse \
+              --task_name deepsomatic \
+              --scratch_dir /scratch || \
+              { echo "Warning: Failed to update vspipeline_inputs.json for DeepSomatic VCF, continuing..."; }
+          fi
+          CLAIR3_TUMOR_VCF="${output_folder}/${tumor_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+          if [ -f "$CLAIR3_TUMOR_VCF" ]; then
+            RELATIVE_PATH=$(echo "$CLAIR3_TUMOR_VCF" | sed "s|^${WORKSPACE_DIR}/||")
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$tumor_sample_name" \
+              --file "$RELATIVE_PATH" \
+              --file_type multiverse \
+              --task_name deepsomatic \
+              --scratch_dir /scratch || \
+              { echo "Warning: Failed to update vspipeline_inputs.json for Clair3 tumor VCF, continuing..."; }
+          fi
+          if [ -n "$normal_sample_name" ] && [ -f "${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz" ]; then
+            CLAIR3_NORMAL_VCF="${output_folder}/${normal_sample_name}.clair3.small_variants.correct_ref.vcf.gz"
+            RELATIVE_PATH=$(echo "$CLAIR3_NORMAL_VCF" | sed "s|^${WORKSPACE_DIR}/||")
+            python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+              --input_dir "$output_folder" \
+              --sample "$normal_sample_name" \
+              --file "$RELATIVE_PATH" \
+              --file_type multiverse \
+              --task_name deepsomatic \
+              --scratch_dir /scratch || \
+              { echo "Warning: Failed to update vspipeline_inputs.json for Clair3 normal VCF, continuing..."; }
+          fi
+        else
+          echo "Warning: python3 not available, skipping vspipeline_inputs.json update"
+        fi
 
         # Copy udocker cache to output folder
         if [ "$cache_udocker_images" = true ] && [ ! -d "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" ]; then

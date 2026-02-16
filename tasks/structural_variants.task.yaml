@@ -101,6 +101,27 @@ steps:
         LOCAL_REF_FASTA="/scratch/$(basename "$REF_FASTA")"
         LOCAL_REF_INDEX="/scratch/$(basename "$REF_INDEX")"
         LOCAL_REF_FLAT="/scratch/$(basename "$REF_FLAT")"
+        
+        # Verify reference files were copied successfully
+        echo "Verifying reference files in /scratch..."
+        if [ ! -f "$LOCAL_REF_FASTA" ]; then
+          echo "Error: Reference FASTA file not found at $LOCAL_REF_FASTA after copying"
+          echo "Original file: $REF_FASTA"
+          echo "Files in /scratch:"
+          ls -la /scratch/ | grep -E "\.(fasta|fa)$" || echo "No FASTA files found in /scratch"
+          exit 1
+        fi
+        if [ ! -f "$LOCAL_REF_INDEX" ]; then
+          echo "Error: Reference FASTA index file not found at $LOCAL_REF_INDEX after copying"
+          echo "Original file: $REF_INDEX"
+          exit 1
+        fi
+        if [ ! -f "$LOCAL_REF_FLAT" ]; then
+          echo "Error: Reference FLAT file not found at $LOCAL_REF_FLAT after copying"
+          echo "Original file: $REF_FLAT"
+          exit 1
+        fi
+        echo "✓ All reference files verified in /scratch"
 
         echo "*************************"
         echo "Gathering tumor and normal input files..."
@@ -155,18 +176,18 @@ steps:
             echo "Error: Normal BAM file not found at $NORMAL_BAM"
             exit 1
           fi
-        fi
-        if [ ! -f "$NORMAL_BAM_INDEX" ]; then
-          echo "Error: Normal BAM index file not found at $NORMAL_BAM_INDEX"
-          exit 1
-        fi
-        if [ ! -f "$NORMAL_PHASED_VCF" ]; then
-          echo "Error: Normal phased VCF file not found at $NORMAL_PHASED_VCF"
-          exit 1
-        fi
-        if [ ! -f "$NORMAL_PHASED_VCF_INDEX" ]; then
-          echo "Error: Normal phased VCF index file not found at $NORMAL_PHASED_VCF_INDEX"
-          exit 1
+          if [ ! -f "$NORMAL_BAM_INDEX" ]; then
+            echo "Error: Normal BAM index file not found at $NORMAL_BAM_INDEX"
+            exit 1
+          fi
+          if [ ! -f "$NORMAL_PHASED_VCF" ]; then
+            echo "Error: Normal phased VCF file not found at $NORMAL_PHASED_VCF"
+            exit 1
+          fi
+          if [ ! -f "$NORMAL_PHASED_VCF_INDEX" ]; then
+            echo "Error: Normal phased VCF index file not found at $NORMAL_PHASED_VCF_INDEX"
+            exit 1
+          fi
         fi
         if [ ! -f "$TRF_BED" ]; then
           echo "Error: TRF BED file not found at $TRF_BED"
@@ -221,7 +242,6 @@ steps:
           # Set variables to simulate successful completion for downstream steps
           SEVERUS_SOMATIC_VCF="$SEVERUS_OUTPUT_VCF"
           SEVERUS_ALL_VCF="$SEVERUS_ALL_VCF"
-          SEVERUS_SV_VCF="$SEVERUS_OUTPUT_VCF"  # This is needed for downstream steps
           SEVERUS_OUTPUT='{"outputs":{"Severus_sv.output_vcf":"'$SEVERUS_OUTPUT_VCF'","Severus_sv.output_all_vcf":"'$SEVERUS_ALL_VCF'"}}'
 
         else
@@ -285,21 +305,60 @@ steps:
             handle_miniwdl_failure $SEVERUS_OUTPUT_EXIT_CODE
           fi
           
+          # Extract output file paths from SEVERUS_OUTPUT
+          SEVERUS_SOMATIC_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_vcf"')
+          SEVERUS_ALL_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_all_vcf"')
+
+          # Copy Severus outputs immediately after completion
+          echo "Copying Severus outputs..."
+          SEVERUS_OUTPUT_FILES=()
+          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_SOMATIC="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+            cp "$SEVERUS_SOMATIC_VCF" "$SEVERUS_RENAMED_SOMATIC"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_SOMATIC")
+          fi
+          if [ -f "$SEVERUS_ALL_VCF" ]; then
+            # Rename to include sample name prefix
+            SEVERUS_RENAMED_ALL="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
+            cp "$SEVERUS_ALL_VCF" "$SEVERUS_RENAMED_ALL"
+            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_ALL")
+          fi
+          if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
+            echo "Severus outputs copied with sample name prefix"
+          fi
+
+          # Update vspipeline_inputs.json with Severus VCF files
+          echo "Updating vspipeline_inputs.json for Severus outputs..."
+          if ! command -v python3 &> /dev/null; then
+            echo "Warning: python3 not available, skipping vspipeline_inputs.json update"
+          else
+            # Add Severus somatic VCF to bnd
+            SEVERUS_SOMATIC_VCF="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+            if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
+              RELATIVE_PATH="${SEVERUS_SOMATIC_VCF#${WORKSPACE_DIR}/}"
+              python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+                --input_dir "$output_folder" \
+                --sample "$tumor_sample_name" \
+                --file "$RELATIVE_PATH" \
+                --file_type bnd \
+                --task_name severus \
+                --scratch_dir /scratch || \
+                { echo "Warning: Failed to update vspipeline_inputs.json for Severus somatic VCF, continuing..."; }
+            fi
+          fi
+          
           # Post-execution logging for Severus
           SEVERUS_END_TIME=$(date +%s)
           SEVERUS_DURATION=$((SEVERUS_END_TIME - SEVERUS_START_TIME))
           SEVERUS_DURATION_HOUR=$((SEVERUS_DURATION / 3600))
           SEVERUS_DURATION_MIN=$(((SEVERUS_DURATION % 3600) / 60))
           SEVERUS_DURATION_SEC=$((SEVERUS_DURATION % 60))
-          
+
           echo "================================================"
           echo "✅ SEVERUS ANALYSIS COMPLETED SUCCESSFULLY"
           echo "================================================"
           echo "⏱️  Execution Time: ${SEVERUS_DURATION_HOUR}h ${SEVERUS_DURATION_MIN}m ${SEVERUS_DURATION_SEC}s"
-          
-          # Extract output file paths from SEVERUS_OUTPUT
-          SEVERUS_SOMATIC_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_vcf"')
-          SEVERUS_ALL_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_all_vcf"')
           
           # Calculate total output size
           SEVERUS_TOTAL_SIZE=0
@@ -331,31 +390,12 @@ steps:
           
           if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
             echo "  - Somatic SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
-            SEVERUS_SV_VCF="$SEVERUS_SOMATIC_VCF" # needed for downstream steps
           fi
           if [ -f "$SEVERUS_ALL_VCF" ]; then
             echo "  - All SV VCF: $(basename "$SEVERUS_ALL_VCF") ($(format_file_size "$SEVERUS_ALL_VCF"))"
           fi
           echo "================================================"
           
-          # Copy Severus outputs immediately after completion
-          echo "Copying Severus outputs..."
-          SEVERUS_OUTPUT_FILES=()
-          if [ -f "$SEVERUS_SOMATIC_VCF" ]; then
-            # Rename to include sample name prefix
-            SEVERUS_RENAMED_SOMATIC="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
-            cp "$SEVERUS_SOMATIC_VCF" "$SEVERUS_RENAMED_SOMATIC"
-            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_SOMATIC")
-          fi
-          if [ -f "$SEVERUS_ALL_VCF" ]; then
-            # Rename to include sample name prefix
-            SEVERUS_RENAMED_ALL="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
-            cp "$SEVERUS_ALL_VCF" "$SEVERUS_RENAMED_ALL"
-            SEVERUS_OUTPUT_FILES+=("$SEVERUS_RENAMED_ALL")
-          fi
-          if [ ${#SEVERUS_OUTPUT_FILES[@]} -gt 0 ]; then
-            echo "Severus outputs copied with sample name prefix"
-          fi
         fi
 
         # Fix Severus VCF sample names and create indices
@@ -364,26 +404,51 @@ steps:
         echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
         echo "*************************"
         
+        # Copy Severus VCFs to /scratch before processing
+        SEVERUS_SOMATIC_INPUT="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
+        SEVERUS_ALL_INPUT="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
+        
+        SEVERUS_SOMATIC_LOCAL="/scratch/${tumor_sample_name}.severus_somatic.vcf.gz"
+        SEVERUS_ALL_LOCAL="/scratch/${tumor_sample_name}.severus_all.vcf.gz"
+        
+        # Copy Severus somatic VCF to /scratch if it exists
+        if [ -f "$SEVERUS_SOMATIC_INPUT" ]; then
+          echo "Copying Severus somatic VCF to /scratch..."
+          cp "$SEVERUS_SOMATIC_INPUT" "$SEVERUS_SOMATIC_LOCAL"
+          if [ -f "${SEVERUS_SOMATIC_INPUT}.tbi" ]; then
+            cp "${SEVERUS_SOMATIC_INPUT}.tbi" "${SEVERUS_SOMATIC_LOCAL}.tbi"
+          fi
+        fi
+        
+        # Copy Severus all VCF to /scratch if it exists
+        if [ -f "$SEVERUS_ALL_INPUT" ]; then
+          echo "Copying Severus all VCF to /scratch..."
+          cp "$SEVERUS_ALL_INPUT" "$SEVERUS_ALL_LOCAL"
+          if [ -f "${SEVERUS_ALL_INPUT}.tbi" ]; then
+            cp "${SEVERUS_ALL_INPUT}.tbi" "${SEVERUS_ALL_LOCAL}.tbi"
+          fi
+        fi
+        
         # Process Severus somatic VCF
-        SEVERUS_SOMATIC_FIXED="${output_folder}/${tumor_sample_name}.severus_somatic.vcf.gz"
-        if [ -f "$SEVERUS_SOMATIC_FIXED" ]; then
-          echo "Processing Severus somatic VCF: $(basename "$SEVERUS_SOMATIC_FIXED")"
+        if [ -f "$SEVERUS_SOMATIC_LOCAL" ]; then
+          echo "Processing Severus somatic VCF: $(basename "$SEVERUS_SOMATIC_LOCAL")"
           
           # Check if sample names need fixing
-          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_SOMATIC_FIXED" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
+          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_SOMATIC_LOCAL" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
           NEEDS_FIXING=$(echo "$NEEDS_FIXING" | tr -d '\n\r')
           
           if [ "$NEEDS_FIXING" -gt 0 ]; then
             echo "  - Sample names need fixing, processing..."
             
             # Create temporary file for processing
-            SEVERUS_SOMATIC_TEMP="/scratch/$(basename "$SEVERUS_SOMATIC_FIXED").temp"
+            SEVERUS_SOMATIC_TEMP="/scratch/${tumor_sample_name}.severus_somatic.temp.vcf"
             
             # Fix sample names (remove .hiphase suffix)
-            sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" "$SEVERUS_SOMATIC_FIXED" > "$SEVERUS_SOMATIC_TEMP"
+            bcftools view -h "$SEVERUS_SOMATIC_LOCAL" | sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" > "$SEVERUS_SOMATIC_TEMP"
+            bcftools view -H "$SEVERUS_SOMATIC_LOCAL" >> "$SEVERUS_SOMATIC_TEMP"
             
-            # Compress and replace original file
-            bgzip -c "$SEVERUS_SOMATIC_TEMP" > "$SEVERUS_SOMATIC_FIXED"
+            # Compress and replace local file
+            bgzip -c "$SEVERUS_SOMATIC_TEMP" > "$SEVERUS_SOMATIC_LOCAL"
             rm -f "$SEVERUS_SOMATIC_TEMP"
             
             echo "  - Sample names fixed"
@@ -392,38 +457,40 @@ steps:
           fi
           
           # Create TBI index (check if it doesn't already exist)
-          if [ ! -f "${SEVERUS_SOMATIC_FIXED}.tbi" ]; then
-            tabix -p vcf "$SEVERUS_SOMATIC_FIXED"
-            echo "  - Created TBI index"
+          if [ ! -f "${SEVERUS_SOMATIC_LOCAL}.tbi" ]; then
+            tabix -f -p vcf "$SEVERUS_SOMATIC_LOCAL" || { echo "  - Warning: Failed to create TBI index"; if [ ! -f "${SEVERUS_SOMATIC_LOCAL}.tbi" ]; then echo "  - Index file does not exist"; else echo "  - Index file exists, continuing..."; fi; }
+            if [ -f "${SEVERUS_SOMATIC_LOCAL}.tbi" ]; then
+              echo "  - Created TBI index"
+            fi
           else
             echo "  - TBI index already exists"
           fi
         fi
         
         # Process Severus all VCF
-        SEVERUS_ALL_FIXED="${output_folder}/${tumor_sample_name}.severus_all.vcf.gz"
-        if [ -f "$SEVERUS_ALL_FIXED" ]; then
-          echo "Processing Severus all VCF: $(basename "$SEVERUS_ALL_FIXED")"
+        if [ -f "$SEVERUS_ALL_LOCAL" ]; then
+          echo "Processing Severus all VCF: $(basename "$SEVERUS_ALL_LOCAL")"
           
           # Check if sample names need fixing
-          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_ALL_FIXED" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
+          NEEDS_FIXING=$(bcftools view -h "$SEVERUS_ALL_LOCAL" | grep -E "^#CHROM|^#FORMAT" | grep -c "\.hiphase" 2>/dev/null || echo "0")
           NEEDS_FIXING=$(echo "$NEEDS_FIXING" | tr -d '\n\r')
           
           if [ "$NEEDS_FIXING" -gt 0 ]; then
             echo "  - Sample names need fixing, processing..."
             
             # Create temporary file for processing
-            SEVERUS_ALL_TEMP="/scratch/$(basename "$SEVERUS_ALL_FIXED").temp"
+            SEVERUS_ALL_TEMP="/scratch/${tumor_sample_name}.severus_all.temp.vcf"
             
             # Fix sample names (remove .hiphase suffix from both tumor and normal samples)
             if [ -n "${normal_sample_name}" ]; then
-              sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g; s/${normal_sample_name}\.hiphase/${normal_sample_name}/g" "$SEVERUS_ALL_FIXED" > "$SEVERUS_ALL_TEMP"
+              bcftools view -h "$SEVERUS_ALL_LOCAL" | sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g; s/${normal_sample_name}\.hiphase/${normal_sample_name}/g" > "$SEVERUS_ALL_TEMP"
             else
-              sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" "$SEVERUS_ALL_FIXED" > "$SEVERUS_ALL_TEMP"
+              bcftools view -h "$SEVERUS_ALL_LOCAL" | sed "s/${tumor_sample_name}\.hiphase/${tumor_sample_name}/g" > "$SEVERUS_ALL_TEMP"
             fi
+            bcftools view -H "$SEVERUS_ALL_LOCAL" >> "$SEVERUS_ALL_TEMP"
             
-            # Compress and replace original file
-            bgzip -c "$SEVERUS_ALL_TEMP" > "$SEVERUS_ALL_FIXED"
+            # Compress and replace local file
+            bgzip -c "$SEVERUS_ALL_TEMP" > "$SEVERUS_ALL_LOCAL"
             rm -f "$SEVERUS_ALL_TEMP"
             
             echo "  - Sample names fixed"
@@ -432,17 +499,23 @@ steps:
           fi
           
           # Create TBI index (check if it doesn't already exist)
-          if [ ! -f "${SEVERUS_ALL_FIXED}.tbi" ]; then
-            tabix -p vcf "$SEVERUS_ALL_FIXED"
-            echo "  - Created TBI index"
+          if [ ! -f "${SEVERUS_ALL_LOCAL}.tbi" ]; then
+            tabix -f -p vcf "$SEVERUS_ALL_LOCAL" || { echo "  - Warning: Failed to create TBI index"; if [ ! -f "${SEVERUS_ALL_LOCAL}.tbi" ]; then echo "  - Index file does not exist"; else echo "  - Index file exists, continuing..."; fi; }
+            if [ -f "${SEVERUS_ALL_LOCAL}.tbi" ]; then
+              echo "  - Created TBI index"
+            fi
           else
             echo "  - TBI index already exists"
           fi
         fi
         
-        # Update variables to point to the fixed VCFs for downstream steps
-        if [ -f "$SEVERUS_SOMATIC_FIXED" ]; then
-          SEVERUS_SV_VCF="$SEVERUS_SOMATIC_FIXED"  # Update for downstream steps
+        # Update variables to point to the fixed VCFs in /scratch for downstream steps
+        if [ -f "$SEVERUS_SOMATIC_LOCAL" ]; then
+          SEVERUS_SOMATIC_VCF="$SEVERUS_SOMATIC_LOCAL"
+        fi
+
+        if [ -f "$SEVERUS_ALL_LOCAL" ]; then
+          SEVERUS_ALL_VCF="$SEVERUS_ALL_LOCAL"
         fi
         
         echo "Severus VCF processing completed successfully"
@@ -458,34 +531,15 @@ steps:
 
         # Check if Wakhan outputs already exist
         echo "Checking if Wakhan outputs already exist..."
-        WAKHAN_TAR="${output_folder}/${tumor_sample_name}_wakhan.tar.gz"
-        PURITY_PLOIDY="${output_folder}/purity_ploidy.tsv"
-        COPYNUMBERS_BED="${output_folder}/${tumor_sample_name}.copynumbers_segments.bed"
-        LOH_BED="${output_folder}/${tumor_sample_name}.loh_regions.bed"
-        CANCER_GENES_BED="${output_folder}/${tumor_sample_name}.cancer_genes_copynumber.bed"
+        WAKHAN_CNA_INTEGERS_VCF="${output_folder}/${tumor_sample_name}.wakhan_cna_integers.vcf.gz"
+        WAKHAN_CNA_SUBCLONALS_VCF="${output_folder}/${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz"
         
-        if [ -f "$WAKHAN_TAR" ] && [ -f "$PURITY_PLOIDY" ] && [ -f "$COPYNUMBERS_BED" ] && [ -f "$LOH_BED" ] && [ -f "$CANCER_GENES_BED" ]; then
+        if [ -f "$WAKHAN_CNA_INTEGERS_VCF" ] && [ -f "${WAKHAN_CNA_INTEGERS_VCF}.tbi" ] && [ -f "$WAKHAN_CNA_SUBCLONALS_VCF" ] && [ -f "${WAKHAN_CNA_SUBCLONALS_VCF}.tbi" ]; then
           echo "Wakhan outputs already exist. Skipping Wakhan step."
-          echo "  - Wakhan Archive: $(basename "$WAKHAN_TAR") ($(format_file_size "$WAKHAN_TAR"))"
-          echo "  - Purity Ploidy: $(basename "$PURITY_PLOIDY") ($(format_file_size "$PURITY_PLOIDY"))"
-          echo "  - Copy Number Segments: $(basename "$COPYNUMBERS_BED") ($(format_file_size "$COPYNUMBERS_BED"))"
-          echo "  - LOH Regions: $(basename "$LOH_BED") ($(format_file_size "$LOH_BED"))"
-          echo "  - Cancer Genes Copy Number: $(basename "$CANCER_GENES_BED") ($(format_file_size "$CANCER_GENES_BED"))"
+          echo "  - CNA Integers VCF: $(basename "$WAKHAN_CNA_INTEGERS_VCF") ($(format_file_size "$WAKHAN_CNA_INTEGERS_VCF"))"
+          echo "  - CNA Subclonals VCF: $(basename "$WAKHAN_CNA_SUBCLONALS_VCF") ($(format_file_size "$WAKHAN_CNA_SUBCLONALS_VCF"))"
         else
           echo "Wakhan outputs missing. Proceeding with Wakhan analysis..."
-
-          # Get Severus SV VCF from Severus step output
-          echo "Attempting to extract Severus SV VCF from output..."
-          SEVERUS_SV_VCF=$(echo "$SEVERUS_OUTPUT" | jq -r '.outputs."Severus_sv.output_vcf"')
-          echo "Extracted SEVERUS_SV_VCF: '$SEVERUS_SV_VCF'"
-          
-          if [ -z "$SEVERUS_SV_VCF" ] || [ "$SEVERUS_SV_VCF" = "null" ]; then
-            echo "Error: Severus SV VCF not found in Severus step output"
-            echo "DEBUG: Full SEVERUS_OUTPUT content:"
-            echo "$SEVERUS_OUTPUT"
-            echo "DEBUG: jq command used: echo \"\$SEVERUS_OUTPUT\" | jq -r '.outputs.\"Severus_sv.output_vcf\"'"
-            exit 1
-          fi
 
           # Pre-execution logging for Wakhan
           echo "================================================"
@@ -497,7 +551,7 @@ steps:
           echo "  - Tumor BAM Index: $(basename "$LOCAL_TUMOR_BAM_INDEX") ($(format_file_size "$LOCAL_TUMOR_BAM_INDEX"))"
           echo "  - Reference FASTA: $(basename "$LOCAL_REF_FASTA") ($(format_file_size "$LOCAL_REF_FASTA"))"
           echo "  - Reference FASTA Index: $(basename "$LOCAL_REF_INDEX") ($(format_file_size "$LOCAL_REF_INDEX"))"
-          echo "  - Severus SV VCF: $(basename "$SEVERUS_SV_VCF") ($(format_file_size "$SEVERUS_SV_VCF"))"
+          echo "  - Severus SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
           echo "  - Normal Phased VCF: $(basename "$LOCAL_NORMAL_PHASED_VCF") ($(format_file_size "$LOCAL_NORMAL_PHASED_VCF"))"
           echo "  - Tumor Phased VCF: $(basename "$LOCAL_TUMOR_PHASED_VCF") ($(format_file_size "$LOCAL_TUMOR_PHASED_VCF"))"
           echo "================================================"
@@ -549,213 +603,358 @@ steps:
               find "$HOME/.local/bin" -name "wakhan*" -type f 2>/dev/null || echo "No wakhan binary found in ~/.local/bin"
               exit 1
             fi
-            
-            cd /scratch
+
           fi
           
           cd /scratch
-          
-          # Build Wakhan command arguments
-          WAKHAN_ARGS="--threads $AGENT_CPU_CORES --target-bam $LOCAL_TUMOR_BAM --reference $LOCAL_REF_FASTA --genome-name $tumor_sample_name --out-dir $tumor_sample_name""_wakhan --breakpoints $SEVERUS_SV_VCF --loh-enable --ploidy-range 1-6 --purity-range 0.2-1.0"
-          
-          # Add centromere annotation file (from installed Wakhan)
-          CENTROMERE_BED="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources/human_GRCh38_no_alt_analysis_set.centromere.bed"
-          if [ -f "$CENTROMERE_BED" ]; then
-            cp "$CENTROMERE_BED" "/scratch/grch38.centromere.bed"
-            WAKHAN_ARGS="$WAKHAN_ARGS --centromere /scratch/grch38.centromere.bed"
-          else
-            # Use Wakhan's built-in centromere file
-            WAKHAN_ARGS="$WAKHAN_ARGS --centromere /scratch/Wakhan/src/annotations/grch38.cen_coord.curated.bed"
-          fi
-          
-          # Add normal germline VCF if available, otherwise use tumor VCF with hets ratio
-          if [ -n "${normal_sample_name}" ]; then
-            WAKHAN_ARGS="$WAKHAN_ARGS --normal-phased-vcf $LOCAL_NORMAL_PHASED_VCF"
-          else
-            WAKHAN_ARGS="$WAKHAN_ARGS --tumor-vcf $LOCAL_TUMOR_PHASED_VCF --hets-ratio 0.25"
-          fi
 
-          # Run Wakhan directly
-          echo "Running Wakhan with args: $WAKHAN_ARGS"
-          wakhan $WAKHAN_ARGS > /dev/null 2>wakhan_error.log
+          # Copy Severus VCF to scratch with a simple name to avoid path issues
+          LOCAL_SEVERUS_VCF="/scratch/${tumor_sample_name}.severus_somatic.vcf.gz"
+          if [ ! -f "$LOCAL_SEVERUS_VCF" ]; then
+            echo "Copying Severus VCF to scratch: $SEVERUS_SOMATIC_VCF -> $LOCAL_SEVERUS_VCF"
+            cp "$SEVERUS_SOMATIC_VCF" "$LOCAL_SEVERUS_VCF" || { echo "Failed to copy Severus somatic VCF; probably already exists"; }
+            cp "${SEVERUS_SOMATIC_VCF}.tbi" "${LOCAL_SEVERUS_VCF}.tbi" || { echo "Failed to copy Severus somatic VCF index; probably already exists"; }
+          else
+            echo "Severus VCF already exists in scratch: $LOCAL_SEVERUS_VCF"
+          fi
           
+          # Setup centromere annotation file
+          CENTROMERE_BED="/scratch/Wakhan/src/annotations/grch38.cen_coord.curated.bed"
+          
+          # Set up gene annotation BED file
+          GENES_BED="/scratch/Wakhan/src/annotations/COSMIC_cancer_genes.tsv"
+
+          # Run Wakhan
+          set +e
+          echo "Running Wakhan..."
+          
+          # Build Wakhan command - follow WDL workflow pattern:
+          # If normal VCF is provided: use --normal-phased-vcf only
+          # If no normal VCF: use --tumor-vcf with --hets-ratio
+          WAKHAN_CMD="wakhan \
+            --threads $AGENT_CPU_CORES \
+            --target-bam \"$LOCAL_TUMOR_BAM\" \
+            --reference \"$LOCAL_REF_FASTA\" \
+            --genome-name \"$tumor_sample_name\" \
+            --out-dir \"${tumor_sample_name}_wakhan\" \
+            --breakpoints \"$LOCAL_SEVERUS_VCF\" \
+            --loh-enable \
+            --ploidy-range 1-6 \
+            --purity-range 0.2-1.0 \
+            --centromere \"$CENTROMERE_BED\" \
+            --cancer-genes \"$GENES_BED\""
+          
+          # Add VCF parameter based on whether normal sample is provided (matching WDL workflow)
+          if [ -n "${normal_sample_name}" ] && [ -f "$LOCAL_NORMAL_PHASED_VCF" ]; then
+            WAKHAN_CMD="$WAKHAN_CMD --normal-phased-vcf \"$LOCAL_NORMAL_PHASED_VCF\""
+          else
+            # If no normal VCF, use tumor VCF with hets-ratio as per WDL workflow
+            WAKHAN_CMD="$WAKHAN_CMD --tumor-vcf \"$LOCAL_TUMOR_PHASED_VCF\" --hets-ratio 0.25"
+          fi
+          
+          # Run Wakhan with output capture - don't suppress all output, capture it for debugging
+          echo "Executing Wakhan command..."
+          eval $WAKHAN_CMD > wakhan_output.log 2>wakhan_error.log
           WAKHAN_OUTPUT_EXIT_CODE=$?
           set -e
           
+          # Initialize flag to track if Wakhan succeeded
+          WAKHAN_SUCCEEDED=0
+          
           if [ $WAKHAN_OUTPUT_EXIT_CODE -ne 0 ]; then
-            echo "Wakhan failed with exit code $WAKHAN_OUTPUT_EXIT_CODE"
+            echo "⚠️  Wakhan failed with exit code $WAKHAN_OUTPUT_EXIT_CODE"
+            echo "Continuing with downstream steps (Chord HRD, CNVKit) despite Wakhan failure..."
+            echo ""
+            echo "=== Wakhan Error Output ==="
             if [ -f "wakhan_error.log" ]; then
-              echo "Wakhan error log:"
               cat wakhan_error.log
-            fi
-            exit $WAKHAN_OUTPUT_EXIT_CODE
-          fi
-          
-          # Clean up error log if successful
-          rm -f wakhan_error.log
-
-          # Process Wakhan outputs (same logic as in WDL)
-          echo "Processing Wakhan outputs..."
-          
-          # Save purity and ploidy
-          cd ${tumor_sample_name}_wakhan
-          # Create TSV file with headers
-          echo -e "folder_name\tploidy\tpurity\tconfidence" > folder_numbers.tsv
-
-          # Find directories matching the pattern and process them
-          find . -type d -regex ".*/[0-9.]+_[0-9.]+_[0-9.]+$" | while read dir; do
-              # Get just the folder name without the path
-              folder_name=$(basename "$dir")
-              
-              # Split the folder name into components
-              ploidy=$(echo $folder_name | cut -d'_' -f1)
-              purity=$(echo $folder_name | cut -d'_' -f2)
-              confidence=$(echo $folder_name | cut -d'_' -f3)
-              
-              # Append to a temporary file
-              echo -e "$folder_name\t$ploidy\t$purity\t$confidence"
-          done | sort -t$'\t' -k4,4rn > temp.tsv
-
-          # Combine header and sorted content
-          (head -n 1 folder_numbers.tsv; cat temp.tsv) > ../purity_ploidy.tsv
-          rm temp.tsv folder_numbers.tsv
-
-          cd ..
-
-          # Compress all output
-          tar -czvf ${tumor_sample_name}_wakhan.tar.gz ${tumor_sample_name}_wakhan
-
-          # Keep the bed output of the best solution
-          best_folder=$(head -n 2 purity_ploidy.tsv | tail -n 1 | cut -f1)
-          echo "Best folder: $best_folder"
-          cp -r ${tumor_sample_name}_wakhan/${best_folder} ${tumor_sample_name}_wakhan_best
-          # Delete variation_plots folder (big!)
-          rm -rf ${tumor_sample_name}_wakhan_best/variation_plots
-          
-          # Copy and rename files with proper error handling
-          echo "Processing bed output files..."
-          
-          # Handle copynumbers_segments files (there may be multiple HP files)
-          if ls ${tumor_sample_name}_wakhan_best/bed_output/*copynumbers_segments*.bed 1> /dev/null 2>&1; then
-            # If there are multiple files, combine them or take the first one
-            copynumbers_files=($(ls ${tumor_sample_name}_wakhan_best/bed_output/*copynumbers_segments*.bed))
-            if [ ${#copynumbers_files[@]} -eq 1 ]; then
-              # Single file - just rename it
-              mv "${copynumbers_files[0]}" "${tumor_sample_name}.copynumbers_segments.bed"
             else
-              # Multiple files - combine them or take the first one
-              echo "Found ${#copynumbers_files[@]} copynumbers files, using the first one"
-              cp "${copynumbers_files[0]}" "${tumor_sample_name}.copynumbers_segments.bed"
+              echo "No error log file found"
+            fi
+            echo ""
+            echo "=== Wakhan Standard Output (last 50 lines) ==="
+            if [ -f "wakhan_output.log" ]; then
+              tail -n 50 wakhan_output.log || echo "Could not read output log"
+            fi
+            echo ""
+            echo "=== Checking Wakhan output directory ==="
+            if [ -d "${tumor_sample_name}_wakhan" ]; then
+              echo "Output directory exists. Contents:"
+              ls -la "${tumor_sample_name}_wakhan" || true
+              if [ -f "${tumor_sample_name}_wakhan/solutions_ranks.tsv" ]; then
+                echo "Solutions ranks file exists:"
+                head -n 20 "${tumor_sample_name}_wakhan/solutions_ranks.tsv" || true
+              else
+                echo "WARNING: solutions_ranks.tsv not found - Wakhan may have found no valid solutions"
+              fi
+            else
+              echo "Output directory does not exist"
+            fi
+            
+            # Check if this is the specific IndexError we're tracking
+            if grep -q "IndexError: list index out of range" wakhan_error.log 2>/dev/null || grep -q "IndexError: list index out of range" wakhan_output.log 2>/dev/null; then
+              echo ""
+              echo "=== Detected IndexError in Wakhan ==="
+              echo "This error typically means Wakhan found no valid purity/ploidy solutions."
+              echo "Possible causes:"
+              echo "  1. Data quality issues (especially for sex chromosomes)"
+              echo "  2. Purity/ploidy ranges too restrictive (currently: purity 0.2-1.0, ploidy 1-6)"
+              echo "  3. Insufficient heterozygous variants in input VCFs"
+              echo ""
+              echo "Recommendations:"
+              echo "  - Check input VCF quality and variant counts"
+              echo "  - Consider expanding purity range (e.g., 0.1-1.0) or ploidy range"
+              echo "  - Verify tumor and normal phased VCFs have sufficient variants"
+            fi
+            
+            # Set flag to indicate Wakhan failed
+            WAKHAN_SUCCEEDED=0
+            echo ""
+            echo "⚠️  Skipping Wakhan output processing. Continuing with Chord HRD and CNVKit steps..."
+          else
+            # Check if solutions were found even if exit code was 0 (in case Wakhan doesn't properly exit on errors)
+            if [ -d "${tumor_sample_name}_wakhan" ]; then
+              if [ ! -f "${tumor_sample_name}_wakhan/solutions_ranks.tsv" ]; then
+                echo "WARNING: Wakhan completed but solutions_ranks.tsv not found - no solutions may have been generated"
+                echo "Checking for any output directories..."
+                find "${tumor_sample_name}_wakhan" -type d -name "[0-9]*_[0-9]*_[0-9]*" | head -n 5 || echo "No solution directories found"
+                echo "⚠️  Wakhan may have failed to generate valid solutions. Skipping output processing..."
+                WAKHAN_SUCCEEDED=0
+              else
+                WAKHAN_SUCCEEDED=1
+              fi
+            else
+              echo "WARNING: Wakhan output directory not found. Skipping output processing..."
+              WAKHAN_SUCCEEDED=0
+            fi
+          fi
+          
+          # Clean up log files
+          rm -f wakhan_error.log wakhan_output.log
+
+          # Process Wakhan outputs only if Wakhan succeeded
+          if [ $WAKHAN_SUCCEEDED -eq 1 ]; then
+            echo "Processing Wakhan outputs..."
+            
+            # Save purity and ploidy
+            cd ${tumor_sample_name}_wakhan
+            # Create TSV file with headers
+            echo -e "folder_name\tploidy\tpurity\tconfidence" > folder_numbers.tsv
+
+            # Find directories matching the pattern and process them
+            find . -type d -regex ".*/[0-9.]+_[0-9.]+_[0-9.]+$" | while read dir; do
+                # Get just the folder name without the path
+                folder_name=$(basename "$dir")
+                
+                # Split the folder name into components
+                ploidy=$(echo $folder_name | cut -d'_' -f1)
+                purity=$(echo $folder_name | cut -d'_' -f2)
+                confidence=$(echo $folder_name | cut -d'_' -f3)
+                
+                # Append to a temporary file
+                echo -e "$folder_name\t$ploidy\t$purity\t$confidence"
+            done | sort -t$'\t' -k4,4rn > temp.tsv
+
+            # Combine header and sorted content
+            (head -n 1 folder_numbers.tsv; cat temp.tsv) > ../purity_ploidy.tsv
+            rm temp.tsv folder_numbers.tsv
+
+            cd ..
+
+            # Process Wakhan outputs - extract VCF files from the best solution
+            echo "Processing Wakhan outputs..."
+            
+            # Find the repository name for solution_rank 1 in solutions_ranks.tsv
+            if [ -f "${tumor_sample_name}_wakhan/solutions_ranks.tsv" ]; then
+              BEST_SOLUTION=$(head -n 2 "${tumor_sample_name}_wakhan/solutions_ranks.tsv" | tail -n 1 | cut -f1)
+              echo "Best solution repository: $BEST_SOLUTION"
+              
+              # Check if the best solution directory exists
+              if [ -d "${tumor_sample_name}_wakhan/${BEST_SOLUTION}" ]; then
+                BEST_SOLUTION_DIR="${tumor_sample_name}_wakhan/${BEST_SOLUTION}"
+                
+                # Check if vcf_output subdirectory exists
+                if [ -d "${BEST_SOLUTION_DIR}/vcf_output" ]; then
+                  echo "Processing VCF files from ${BEST_SOLUTION_DIR}/vcf_output"
+                  
+                  # Look for the specific VCF files
+                  CNA_INTEGERS_VCF=""
+                  CNA_SUBCLONALS_VCF=""
+                  
+                  # Find CNA integers VCF (usually named something like cna_integers.vcf)
+                  for vcf_file in "${BEST_SOLUTION_DIR}/vcf_output"/*cna_integers*.vcf; do
+                    if [ -f "$vcf_file" ]; then
+                      CNA_INTEGERS_VCF="$vcf_file"
+                      break
+                    fi
+                  done
+                  
+                  # Find CNA subclonals VCF (usually named something like cna_subclonals.vcf)
+                  for vcf_file in "${BEST_SOLUTION_DIR}/vcf_output"/*cna_subclonals*.vcf; do
+                    if [ -f "$vcf_file" ]; then
+                      CNA_SUBCLONALS_VCF="$vcf_file"
+                      break
+                    fi
+                  done
+                  
+                  # Process CNA integers VCF
+                  if [ -n "$CNA_INTEGERS_VCF" ] && [ -f "$CNA_INTEGERS_VCF" ]; then
+                    echo "Found CNA integers VCF: $(basename "$CNA_INTEGERS_VCF")"
+                    
+                    # Copy and rename the VCF file
+                    cp "$CNA_INTEGERS_VCF" "${tumor_sample_name}.wakhan_cna_integers.vcf"
+                    
+                    # Compress the VCF file
+                    bgzip "${tumor_sample_name}.wakhan_cna_integers.vcf"
+                    
+                    # Create TBI index
+                    tabix -f -p vcf "${tumor_sample_name}.wakhan_cna_integers.vcf.gz" || { echo "Warning: Failed to index VCF file"; if [ ! -f "${tumor_sample_name}.wakhan_cna_integers.vcf.gz.tbi" ]; then echo "Index file does not exist"; else echo "Index file exists, continuing..."; fi; }
+                    
+                    echo "Created: ${tumor_sample_name}.wakhan_cna_integers.vcf.gz with index"
+                  else
+                    echo "Warning: CNA integers VCF not found in ${BEST_SOLUTION_DIR}/vcf_output"
+                  fi
+                  
+                  # Process CNA subclonals VCF
+                  if [ -n "$CNA_SUBCLONALS_VCF" ] && [ -f "$CNA_SUBCLONALS_VCF" ]; then
+                    echo "Found CNA subclonals VCF: $(basename "$CNA_SUBCLONALS_VCF")"
+                    
+                    # Copy and rename the VCF file
+                    cp "$CNA_SUBCLONALS_VCF" "${tumor_sample_name}.wakhan_cna_subclonals.vcf"
+                    
+                    # Compress the VCF file
+                    bgzip "${tumor_sample_name}.wakhan_cna_subclonals.vcf"
+                    
+                    # Create TBI index
+                    tabix -f -p vcf "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz" || { echo "Warning: Failed to index VCF file"; if [ ! -f "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz.tbi" ]; then echo "Index file does not exist"; else echo "Index file exists, continuing..."; fi; }
+                    
+                    echo "Created: ${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz with index"
+                  else
+                    echo "Warning: CNA subclonals VCF not found in ${BEST_SOLUTION_DIR}/vcf_output"
+                  fi
+                  
+                else
+                  echo "Warning: vcf_output directory not found in ${BEST_SOLUTION_DIR}"
+                fi
+              else
+                echo "Warning: Best solution directory ${tumor_sample_name}_wakhan/${BEST_SOLUTION} not found"
+              fi
+            else
+              echo "Warning: solutions_ranks.tsv not found in ${tumor_sample_name}_wakhan"
+            fi
+            
+            # Clean up the temporary Wakhan directory
+            rm -rf ${tumor_sample_name}_wakhan
+
+            # Post-execution logging for Wakhan
+            WAKHAN_END_TIME=$(date +%s)
+            WAKHAN_DURATION=$((WAKHAN_END_TIME - WAKHAN_START_TIME))
+            WAKHAN_DURATION_HOUR=$((WAKHAN_DURATION / 3600))
+            WAKHAN_DURATION_MIN=$(((WAKHAN_DURATION % 3600) / 60))
+            WAKHAN_DURATION_SEC=$((WAKHAN_DURATION % 60))
+            
+            echo "================================================"
+            echo "✅ WAKHAN ANALYSIS COMPLETED SUCCESSFULLY"
+            echo "================================================"
+            echo "⏱️  Execution Time: ${WAKHAN_DURATION_HOUR}h ${WAKHAN_DURATION_MIN}m ${WAKHAN_DURATION_SEC}s"
+            
+            # Calculate total output size
+            WAKHAN_TOTAL_SIZE=0
+            if [ -f "${tumor_sample_name}.wakhan_cna_integers.vcf.gz" ]; then
+              WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}.wakhan_cna_integers.vcf.gz" 2>/dev/null || echo "0")))
+            fi
+            if [ -f "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz" ]; then
+              WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz" 2>/dev/null || echo "0")))
+            fi
+            
+            # Format total size
+            if [ $WAKHAN_TOTAL_SIZE -ge 1073741824 ]; then
+              WAKHAN_TOTAL_GB=$((WAKHAN_TOTAL_SIZE / 1024 / 1024 / 1024))
+              WAKHAN_TOTAL_MB=$(((WAKHAN_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
+              WAKHAN_TOTAL_DECIMAL=$((WAKHAN_TOTAL_MB * 100 / 1024))
+              WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_GB}.${WAKHAN_TOTAL_DECIMAL} GB"
+            elif [ $WAKHAN_TOTAL_SIZE -ge 1048576 ]; then
+              WAKHAN_TOTAL_MB=$((WAKHAN_TOTAL_SIZE / 1024 / 1024))
+              WAKHAN_TOTAL_KB=$(((WAKHAN_TOTAL_SIZE % (1024 * 1024)) / 1024))
+              WAKHAN_TOTAL_DECIMAL=$((WAKHAN_TOTAL_KB * 100 / 1024))
+              WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_MB}.${WAKHAN_TOTAL_DECIMAL} MB"
+            else
+              WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_SIZE} bytes"
+            fi
+            
+            echo "📁 **Total Output Size: $WAKHAN_TOTAL_FORMATTED**"
+            echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
+            echo "📁 Output Files:"
+            
+            # Check for Wakhan output files and report their sizes
+            if [ -f "${tumor_sample_name}.wakhan_cna_integers.vcf.gz" ]; then
+              echo "  - CNA Integers VCF: ${tumor_sample_name}.wakhan_cna_integers.vcf.gz ($(format_file_size "${tumor_sample_name}.wakhan_cna_integers.vcf.gz"))"
+            fi
+            if [ -f "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz" ]; then
+              echo "  - CNA Subclonals VCF: ${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz ($(format_file_size "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz"))"
+            fi
+            echo "================================================"
+            
+            # Copy Wakhan outputs immediately after completion
+            echo "Copying Wakhan outputs..."
+            WAKHAN_OUTPUT_FILES=()
+            if [ -f "${tumor_sample_name}.wakhan_cna_integers.vcf.gz" ]; then
+              WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.wakhan_cna_integers.vcf.gz")
+            fi
+            if [ -f "${tumor_sample_name}.wakhan_cna_integers.vcf.gz.tbi" ]; then
+              WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.wakhan_cna_integers.vcf.gz.tbi")
+            fi
+            if [ -f "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz" ]; then
+              WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz")
+            fi
+            if [ -f "${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz.tbi" ]; then
+              WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz.tbi")
+            fi
+            if [ ${#WAKHAN_OUTPUT_FILES[@]} -gt 0 ]; then
+              copy_with_progress "$output_folder" "${WAKHAN_OUTPUT_FILES[@]}"
+            fi
+
+            # Update vspipeline_inputs.json with Wakhan VCF files
+            echo "Updating vspipeline_inputs.json for Wakhan outputs..."
+            if ! command -v python3 &> /dev/null; then
+              echo "Warning: python3 not available, skipping vspipeline_inputs.json update"
+            else
+              # Add Wakhan CNA integers VCF to bnd
+              WAKHAN_CNA_INTEGERS_VCF="${output_folder}/${tumor_sample_name}.wakhan_cna_integers.vcf.gz"
+              if [ -f "$WAKHAN_CNA_INTEGERS_VCF" ]; then
+                RELATIVE_PATH="${WAKHAN_CNA_INTEGERS_VCF#${WORKSPACE_DIR}/}"
+                python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+                  --input_dir "$output_folder" \
+                  --sample "$tumor_sample_name" \
+                  --file "$RELATIVE_PATH" \
+                  --file_type bnd \
+                  --task_name wakhan \
+                  --scratch_dir /scratch || \
+                  { echo "Warning: Failed to update vspipeline_inputs.json for Wakhan CNA integers, continuing..."; }
+              fi
+              
+              # Add Wakhan CNA subclonals VCF to bnd
+              WAKHAN_CNA_SUBCLONALS_VCF="${output_folder}/${tumor_sample_name}.wakhan_cna_subclonals.vcf.gz"
+              if [ -f "$WAKHAN_CNA_SUBCLONALS_VCF" ]; then
+                RELATIVE_PATH="${WAKHAN_CNA_SUBCLONALS_VCF#${WORKSPACE_DIR}/}"
+                python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+                  --input_dir "$output_folder" \
+                  --sample "$tumor_sample_name" \
+                  --file "$RELATIVE_PATH" \
+                  --file_type bnd \
+                  --task_name wakhan \
+                  --scratch_dir /scratch || \
+                  { echo "Warning: Failed to update vspipeline_inputs.json for Wakhan CNA subclonals, continuing..."; }
+              fi
             fi
           else
-            echo "Warning: No copynumbers_segments files found"
-          fi
-          
-          # Handle loh_regions file
-          if [ -f "${tumor_sample_name}_wakhan_best/bed_output/loh_regions.bed" ]; then
-            mv "${tumor_sample_name}_wakhan_best/bed_output/loh_regions.bed" "${tumor_sample_name}.loh_regions.bed"
-          else
-            echo "Warning: loh_regions.bed not found"
-          fi
-          
-          # Handle cancer genes file (check both possible names)
-          if [ -f "${tumor_sample_name}_wakhan_best/bed_output/cancer_genes_copynumber_states.bed" ]; then
-            mv "${tumor_sample_name}_wakhan_best/bed_output/cancer_genes_copynumber_states.bed" "${tumor_sample_name}.cancer_genes_copynumber.bed"
-          elif [ -f "${tumor_sample_name}_wakhan_best/bed_output/genes_copynumber_states.bed" ]; then
-            mv "${tumor_sample_name}_wakhan_best/bed_output/genes_copynumber_states.bed" "${tumor_sample_name}.cancer_genes_copynumber.bed"
-          else
-            echo "Warning: cancer genes copynumber file not found"
-          fi
-
-          rm -rf ${tumor_sample_name}_wakhan
-
-          # Post-execution logging for Wakhan
-          WAKHAN_END_TIME=$(date +%s)
-          WAKHAN_DURATION=$((WAKHAN_END_TIME - WAKHAN_START_TIME))
-          WAKHAN_DURATION_HOUR=$((WAKHAN_DURATION / 3600))
-          WAKHAN_DURATION_MIN=$(((WAKHAN_DURATION % 3600) / 60))
-          WAKHAN_DURATION_SEC=$((WAKHAN_DURATION % 60))
-          
-          echo "================================================"
-          echo "✅ WAKHAN ANALYSIS COMPLETED SUCCESSFULLY"
-          echo "================================================"
-          echo "⏱️  Execution Time: ${WAKHAN_DURATION_HOUR}h ${WAKHAN_DURATION_MIN}m ${WAKHAN_DURATION_SEC}s"
-          
-          # Calculate total output size
-          WAKHAN_TOTAL_SIZE=0
-          if [ -f "${tumor_sample_name}_wakhan.tar.gz" ]; then
-            WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}_wakhan.tar.gz" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "purity_ploidy.tsv" ]; then
-            WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "purity_ploidy.tsv" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "${tumor_sample_name}.copynumbers_segments.bed" ]; then
-            WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}.copynumbers_segments.bed" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "${tumor_sample_name}.loh_regions.bed" ]; then
-            WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}.loh_regions.bed" 2>/dev/null || echo "0")))
-          fi
-          if [ -f "${tumor_sample_name}.cancer_genes_copynumber.bed" ]; then
-            WAKHAN_TOTAL_SIZE=$((WAKHAN_TOTAL_SIZE + $(stat -c%s "${tumor_sample_name}.cancer_genes_copynumber.bed" 2>/dev/null || echo "0")))
-          fi
-          
-          # Format total size
-          if [ $WAKHAN_TOTAL_SIZE -ge 1073741824 ]; then
-            WAKHAN_TOTAL_GB=$((WAKHAN_TOTAL_SIZE / 1024 / 1024 / 1024))
-            WAKHAN_TOTAL_MB=$(((WAKHAN_TOTAL_SIZE % (1024 * 1024 * 1024)) / 1024 / 1024))
-            WAKHAN_TOTAL_DECIMAL=$((WAKHAN_TOTAL_MB * 100 / 1024))
-            WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_GB}.${WAKHAN_TOTAL_DECIMAL} GB"
-          elif [ $WAKHAN_TOTAL_SIZE -ge 1048576 ]; then
-            WAKHAN_TOTAL_MB=$((WAKHAN_TOTAL_SIZE / 1024 / 1024))
-            WAKHAN_TOTAL_KB=$(((WAKHAN_TOTAL_SIZE % (1024 * 1024)) / 1024))
-            WAKHAN_TOTAL_DECIMAL=$((WAKHAN_TOTAL_KB * 100 / 1024))
-            WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_MB}.${WAKHAN_TOTAL_DECIMAL} MB"
-          else
-            WAKHAN_TOTAL_FORMATTED="${WAKHAN_TOTAL_SIZE} bytes"
-          fi
-          
-          echo "📁 **Total Output Size: $WAKHAN_TOTAL_FORMATTED**"
-          echo "💾 **Remaining Disk Space: $(df -h /scratch | tail -n 1 | awk '{print $4}')**"
-          echo "📁 Output Files:"
-          
-          # Check for Wakhan output files and report their sizes
-          if [ -f "${tumor_sample_name}_wakhan.tar.gz" ]; then
-            echo "  - Wakhan Archive: ${tumor_sample_name}_wakhan.tar.gz ($(format_file_size "${tumor_sample_name}_wakhan.tar.gz"))"
-          fi
-          if [ -f "purity_ploidy.tsv" ]; then
-            echo "  - Purity Ploidy: purity_ploidy.tsv ($(format_file_size "purity_ploidy.tsv"))"
-          fi
-          if [ -f "${tumor_sample_name}.copynumbers_segments.bed" ]; then
-            echo "  - Copy Number Segments: ${tumor_sample_name}.copynumbers_segments.bed ($(format_file_size "${tumor_sample_name}.copynumbers_segments.bed"))"
-          fi
-          if [ -f "${tumor_sample_name}.loh_regions.bed" ]; then
-            echo "  - LOH Regions: ${tumor_sample_name}.loh_regions.bed ($(format_file_size "${tumor_sample_name}.loh_regions.bed"))"
-          fi
-          if [ -f "${tumor_sample_name}.cancer_genes_copynumber.bed" ]; then
-            echo "  - Cancer Genes Copy Number: ${tumor_sample_name}.cancer_genes_copynumber.bed ($(format_file_size "${tumor_sample_name}.cancer_genes_copynumber.bed"))"
-          fi
-          echo "================================================"
-          
-          # Copy Wakhan outputs immediately after completion
-          echo "Copying Wakhan outputs..."
-          WAKHAN_OUTPUT_FILES=()
-          if [ -f "${tumor_sample_name}_wakhan.tar.gz" ]; then
-            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}_wakhan.tar.gz")
-          fi
-          if [ -f "purity_ploidy.tsv" ]; then
-            WAKHAN_OUTPUT_FILES+=("purity_ploidy.tsv")
-          fi
-          if [ -f "${tumor_sample_name}.copynumbers_segments.bed" ]; then
-            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.copynumbers_segments.bed")
-          fi
-          if [ -f "${tumor_sample_name}.loh_regions.bed" ]; then
-            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.loh_regions.bed")
-          fi
-          if [ -f "${tumor_sample_name}.cancer_genes_copynumber.bed" ]; then
-            WAKHAN_OUTPUT_FILES+=("${tumor_sample_name}.cancer_genes_copynumber.bed")
-          fi
-          if [ ${#WAKHAN_OUTPUT_FILES[@]} -gt 0 ]; then
-            copy_with_progress "$output_folder" "${WAKHAN_OUTPUT_FILES[@]}"
+            echo "⚠️  Skipping Wakhan output processing due to previous failure."
+            # Clean up any partial Wakhan output directory if it exists
+            if [ -d "${tumor_sample_name}_wakhan" ]; then
+              echo "Cleaning up partial Wakhan output directory..."
+              rm -rf ${tumor_sample_name}_wakhan
+            fi
+            echo "Continuing with Chord HRD and CNVKit steps..."
           fi
         fi
        
@@ -789,7 +988,7 @@ steps:
           echo "📅 Server Time: $(date)"
           echo "📁 Input Files:"
           echo "  - DeepSomatic VCF: $(basename "$LOCAL_TUMOR_SOMATIC_VCF") ($(format_file_size "$LOCAL_TUMOR_SOMATIC_VCF"))"
-          echo "  - Severus SV VCF: $(basename "$SEVERUS_SV_VCF") ($(format_file_size "$SEVERUS_SV_VCF"))"
+          echo "  - Severus SV VCF: $(basename "$SEVERUS_SOMATIC_VCF") ($(format_file_size "$SEVERUS_SOMATIC_VCF"))"
           echo "================================================"
           
           # Record start time
@@ -799,7 +998,7 @@ steps:
           jq -n \
             --arg pname "$tumor_sample_name" \
             --arg deepsomatic_vcf "$LOCAL_TUMOR_SOMATIC_VCF" \
-            --arg severus_sv_vcf "$SEVERUS_SV_VCF" \
+            --arg severus_sv_vcf "$SEVERUS_SOMATIC_VCF" \
             '{
               "chord_hrd.pname": $pname,
               "chord_hrd.small_variant_vcf": $deepsomatic_vcf,
@@ -1050,6 +1249,7 @@ steps:
           CNVKIT_FILES=$(echo "$CNVKIT_OUTPUT" | jq -r '.outputs["cnvkit_tumor.cnvkit_output"] | join(" ")')
           if [ -n "$CNVKIT_FILES" ] && [ "$CNVKIT_FILES" != "null" ]; then
             CNVKIT_OUTPUT_FILES=()
+            CNVKIT_CNS_FILE=""
             for file in $CNVKIT_FILES; do
               if [ -f "$file" ]; then
                 # Extract filename and check if it's one of our target files
@@ -1059,6 +1259,7 @@ steps:
                   # Handle different file patterns: .call.cns, -diagram.pdf, -scatter.png
                   if [[ "$filename" == *".call.cns" ]]; then
                     new_file=$(echo "$file" | sed "s/${tumor_sample_name}\.[^.]*/${tumor_sample_name}.cnvkit/")
+                    CNVKIT_CNS_FILE="$new_file"
                   elif [[ "$filename" == *"-diagram.pdf" ]]; then
                     new_file=$(echo "$file" | sed "s/${tumor_sample_name}[^-]*-/${tumor_sample_name}.cnvkit-/")
                   elif [[ "$filename" == *"-scatter.png" ]]; then
@@ -1072,8 +1273,41 @@ steps:
                 fi
               fi
             done
+            
+            # Update CNVKit CNS file with CNV State field using vspipeline_utilities.py
+            if [ -n "$CNVKIT_CNS_FILE" ] && [ -f "$CNVKIT_CNS_FILE" ]; then
+              echo "Updating CNVKit CNV file with CNV State field..."
+              python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-cnv-file \
+                --input "$CNVKIT_CNS_FILE" \
+                --output "${CNVKIT_CNS_FILE}.tmp"
+              
+              # Replace original with updated file
+              mv "${CNVKIT_CNS_FILE}.tmp" "$CNVKIT_CNS_FILE"
+              echo "CNVKit CNV file updated with CNV State field"
+            fi
+            
             if [ ${#CNVKIT_OUTPUT_FILES[@]} -gt 0 ]; then
               copy_with_progress "$output_folder" "${CNVKIT_OUTPUT_FILES[@]}"
+            fi
+
+            # Update vspipeline_inputs.json with CNVKit CNV file
+            echo "Updating vspipeline_inputs.json for CNVKit outputs..."
+            if ! command -v python3 &> /dev/null; then
+              echo "Warning: python3 not available, skipping vspipeline_inputs.json update"
+            else
+              # Add CNVKit CNS file to cnv
+              CNVKIT_CNS_FILE="${output_folder}/${tumor_sample_name}.cnvkit.call.cns"
+              if [ -f "$CNVKIT_CNS_FILE" ]; then
+                RELATIVE_PATH="${CNVKIT_CNS_FILE#${WORKSPACE_DIR}/}"
+                python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+                  --input_dir "$output_folder" \
+                  --sample "$tumor_sample_name" \
+                  --file "$RELATIVE_PATH" \
+                  --file_type cnv \
+                  --task_name cnvkit \
+                  --scratch_dir /scratch || \
+                  { echo "Warning: Failed to update vspipeline_inputs.json for CNVKit, continuing..."; }
+              fi
             fi
           else
             echo "Warning: CNVKit output files not found in results"

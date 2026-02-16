@@ -7,11 +7,13 @@ agent_requirements:
   memory_gb: 96
 
 parameters:
-  - name: input_folder
-    label: Input Folder
-    type: directory
-    supports_location_mode: 'read_only'
-    help: The input folder containing the uBAMs for alignment. 
+  - name: input_bams
+    label: Input BAM Files
+    type: file
+    pattern_match:
+      - '*.bam'
+    list: true
+    help: The uBAM (unaligned BAM) files to align. Multiple files can be provided and will be aligned and merged.
 
   - name: output_folder
     label: Output Folder
@@ -22,7 +24,7 @@ parameters:
   - name: sample_name
     label: Sample Name
     type: string
-    help: The name of the sample to align. All matching uBAMs will be aligned and merged. 
+    help: The name of the sample to align. 
 
   - name: cache_udocker_images
     label: Cache Udocker Image
@@ -41,11 +43,17 @@ steps:
         echo "Starting Tumor/Normal Alignment Task"
         echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"
         echo "Input Parameters:"
-        echo "  - input_folder: $input_folder"
+        echo "  - input_bams: $input_bams"
         echo "  - output_folder: $output_folder"
         echo "  - sample_name: $sample_name"
         echo "  - cache_udocker_images: $cache_udocker_images"
         echo "*************************"
+        
+        # Validate that at least one BAM file is provided
+        if [ -z "$input_bams" ] || [ "$input_bams" = "" ]; then
+          echo "Error: No input BAM files provided"
+          exit 1
+        fi
 
         # Check if output files already exist
         echo "Checking if output files already exist..."
@@ -55,9 +63,17 @@ steps:
         ALIGNED_BAM="${output_folder}/${sample_name}.aligned.bam"
         ALIGNED_BAM_INDEX="${output_folder}/${sample_name}.aligned.bam.bai"
         
+        # Also check for phased BAM (from hiphase) - if it exists, alignment has already completed
+        PHASED_BAM="${output_folder}/${sample_name}.hiphase.bam"
+        PHASED_BAM_INDEX="${output_folder}/${sample_name}.hiphase.bam.bai"
+        
         if [ ! -f "$ALIGNED_BAM" ] || [ ! -f "$ALIGNED_BAM_INDEX" ]; then
-          OUTPUT_FILES_EXIST=false
-          echo "  - Alignment output files missing"
+          if [ ! -f "$PHASED_BAM" ] || [ ! -f "$PHASED_BAM_INDEX" ]; then
+            OUTPUT_FILES_EXIST=false
+            echo "  - Alignment output files missing (aligned and phased BAMs)"
+          else
+            echo "  - Phased BAM exists, skipping alignment"
+          fi
         fi
         
         if [ "$OUTPUT_FILES_EXIST" = true ]; then
@@ -133,20 +149,57 @@ steps:
         # Ensure output folder exists
         mkdir -p "$output_folder"
 
-        # Get input BAM files and format as JSON array
-        echo "Getting input BAM files and formatting as JSON array..."
+        # Process input BAM files and format as JSON array
+        echo "Processing input BAM files and formatting as JSON array..."
+        
+        # Parse list of input files (comma-separated when list: true is used)
+        # Handle both single files and comma-separated lists properly
+        if [[ "$input_bams" == *,* ]]; then
+          # Multiple files separated by commas
+          IFS=',' read -ra temp_input_files <<< "$input_bams"
+          # Filter out empty strings
+          input_files=()
+          for file in "${temp_input_files[@]}"; do
+            if [ ! -z "$file" ]; then
+              input_files+=("$file")
+            fi
+          done
+        else
+          # Single file - create array with single element
+          input_files=("$input_bams")
+        fi
+        
+        # Build JSON array from input files
         input_bams_json="["
         first=true
-        while IFS= read -r -d '' file; do
+        for bam_file in "${input_files[@]}"; do
+          # Verify file exists
+          if [ ! -f "$bam_file" ]; then
+            echo "Warning: Input BAM file not found: $bam_file, skipping"
+            continue
+          fi
+          
           if [ "$first" = true ]; then
             first=false
           else
             input_bams_json="$input_bams_json,"
           fi
-          input_bams_json="$input_bams_json\"$file\""
-        done < <(find "$input_folder" -maxdepth 1 -type f -name "*.bam" -print0)
-        echo "Input BAM files: $input_bams_json"
+          # Use absolute path for the BAM file
+          abs_bam_path=$(readlink -f "$bam_file" 2>/dev/null || echo "$bam_file")
+          input_bams_json="$input_bams_json\"$abs_bam_path\""
+          echo "  - Added BAM file: $bam_file"
+        done
         input_bams_json="$input_bams_json]"
+        
+        # Validate that we have at least one valid BAM file
+        bam_count=$(echo "$input_bams_json" | jq -r 'length')
+        if [ "$bam_count" -eq 0 ]; then
+          echo "Error: No valid input BAM files found"
+          exit 1
+        fi
+        
+        echo "Input BAM files JSON: $input_bams_json"
+        echo "Total BAM files: $bam_count"
 
         # Run Alignment
         echo "================================================"
@@ -215,9 +268,22 @@ steps:
           cp -r /scratch/.udocker/layers /scratch/.udocker/repos "${WORKSPACE_DIR}/${RESOURCES_PATH}/udocker_cache/${TASK_NAME}" 2>/dev/null || true
         fi
 
-        # Process all files and values in outputs.json
-        echo "Processing all files and values in outputs.json..."
-        bash "$TASK_DIR/utils/process-outputs.sh" "$output_folder" "$sample_name" 
+        # Copy alignment outputs from MiniWDL to output folder
+        echo "Copying alignment outputs to $output_folder..."
+        if [ -f /scratch/_LAST/outputs.json ]; then
+          ALIGNED_BAM=$(jq -r '.["align_all_bams.bam_final"]' /scratch/_LAST/outputs.json)
+          ALIGNED_BAI=$(jq -r '.["align_all_bams.bam_final_index"]' /scratch/_LAST/outputs.json)
+          if [ -n "$ALIGNED_BAM" ] && [ "$ALIGNED_BAM" != "null" ] && [ -f "$ALIGNED_BAM" ]; then
+            cp "$ALIGNED_BAM" "$output_folder/${sample_name}.aligned.bam"
+            echo "  - Copied: ${sample_name}.aligned.bam"
+          fi
+          if [ -n "$ALIGNED_BAI" ] && [ "$ALIGNED_BAI" != "null" ] && [ -f "$ALIGNED_BAI" ]; then
+            cp "$ALIGNED_BAI" "$output_folder/${sample_name}.aligned.bam.bai"
+            echo "  - Copied: ${sample_name}.aligned.bam.bai"
+          fi
+        else
+          echo "Warning: outputs.json not found at /scratch/_LAST/outputs.json"
+        fi
 
         if [ $MINIWDL_EXIT_CODE -ne 0 ]; then
           echo "MiniWDL run failed with exit code $MINIWDL_EXIT_CODE"

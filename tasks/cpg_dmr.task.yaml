@@ -500,6 +500,21 @@ steps:
           copy_with_progress "$output_folder" "$DMR_FILE"
         fi
         
+        # Update vspipeline_inputs.json with DMR file for region/update regions import
+        DMR_OUTPUT_PATH="${output_folder}/${tumor_sample_name}.DMR.tsv"
+        if [ -f "$DMR_OUTPUT_PATH" ] && command -v python3 &> /dev/null; then
+          echo "Updating vspipeline_inputs.json with DMR file..."
+          RELATIVE_PATH=$(echo "$DMR_OUTPUT_PATH" | sed "s|^${WORKSPACE_DIR}/||")
+          python3 "${TASK_DIR}/vspipeline-resources/vspipeline_utilities.py" update-vspipeline-json \
+            --input_dir "$output_folder" \
+            --sample "$tumor_sample_name" \
+            --file "$RELATIVE_PATH" \
+            --file_type region \
+            --task_name cpg_dmr \
+            --scratch_dir /scratch || \
+            { echo "Warning: Failed to update vspipeline_inputs.json for DMR file, continuing..."; }
+        fi
+        
         # Copy pb-CpG-tools binary to cache for future use
         if [ "$cache_udocker_images" = true ]; then
           mkdir -p "${WORKSPACE_DIR}/${RESOURCES_PATH}/pb_cpg_tools_cache"

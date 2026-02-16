@@ -129,29 +129,30 @@ steps:
         # Record start time
         SEQKIT_START_TIME=$(date +%s)
         
-        # Set up input JSON
+        # Set up input JSON (use names like bam_path to avoid task runner expanding $phased_bam in the jq program)
         jq -n \
-          --arg phased_bam "$LOCAL_PHASED_BAM" \
-          --arg phased_bam_index "$LOCAL_PHASED_BAM_INDEX" \
+          --arg bam_path "$LOCAL_PHASED_BAM" \
+          --arg bam_index_path "$LOCAL_PHASED_BAM_INDEX" \
           --argjson threads "$AGENT_CPU_CORES" \
           '{
-            "seqkit_bamstats.bam": $phased_bam,
-            "seqkit_bamstats.bam_index": $phased_bam_index,
+            "seqkit_bamstats.bam": $bam_path,
+            "seqkit_bamstats.bam_index": $bam_index_path,
             "seqkit_bamstats.threads": $threads
           }' > /scratch/seqkit_bamstats_inputs.json
 
-        # Run SeqKit with miniwdl
+        # Run SeqKit with miniwdl (use -o to write JSON to file to avoid shell quoting issues)
         set +e
-        BAMSTATS_MINIWDL_OUTPUT=$(miniwdl run \
+        miniwdl run \
           --task seqkit_bamstats \
           "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
           --dir /scratch \
           --runtime-cpu-max=$AGENT_CPU_CORES \
           --runtime-memory-max=${AGENT_MEMORY_GB}G \
-          -i /scratch/seqkit_bamstats_inputs.json 2>/dev/null
-        )
+          -i /scratch/seqkit_bamstats_inputs.json \
+          -o /scratch/bamstats_outputs.json 2>/dev/null
         BAMSTATS_MINIWDL_EXIT_CODE=$?
         set -e
+        BAMSTATS_MINIWDL_OUTPUT=$(cat /scratch/bamstats_outputs.json)
 
         if [ $BAMSTATS_MINIWDL_EXIT_CODE -ne 0 ]; then
           echo "SeqKit BAM statistics failed with exit code $BAMSTATS_MINIWDL_EXIT_CODE"
@@ -209,26 +210,28 @@ steps:
         # Record start time
         SUMMARY_START_TIME=$(date +%s)
         
-        # Set up input JSON
+        # Set up input JSON (use stats_path to avoid task runner expanding $seqkit_alignment_stats in the jq program)
         jq -n \
-          --arg seqkit_alignment_stats "$LOCAL_SEQKIT_ALIGNMENT_STATS" \
+          --arg stats_path "$LOCAL_SEQKIT_ALIGNMENT_STATS" \
           --argjson threads "$AGENT_CPU_CORES" \
           '{
-            "summarize_seqkit_alignment.seqkit_alignment_stats": $seqkit_alignment_stats,
+            "summarize_seqkit_alignment.seqkit_alignment_stats": $stats_path,
             "summarize_seqkit_alignment.threads": $threads
           }' > /scratch/summarize_seqkit_alignment_inputs.json
 
-        # Run summary task with miniwdl
+        # Run summary task with miniwdl (use -o to write JSON to file to avoid shell quoting issues)
         set +e
-        SUMMARY_MINIWDL_OUTPUT=$(miniwdl run \
+        miniwdl run \
           --task summarize_seqkit_alignment \
           "${TASK_DIR}/HiFi-somatic-WDL-0.9.2/tasks/common.wdl" \
           --dir /scratch \
           --runtime-cpu-max=$AGENT_CPU_CORES \
           --runtime-memory-max=${AGENT_MEMORY_GB}G \
-          -i /scratch/summarize_seqkit_alignment_inputs.json 2>/dev/null)
+          -i /scratch/summarize_seqkit_alignment_inputs.json \
+          -o /scratch/summary_outputs.json 2>/dev/null
         SUMMARY_MINIWDL_EXIT_CODE=$?
         set -e
+        SUMMARY_MINIWDL_OUTPUT=$(cat /scratch/summary_outputs.json)
 
         if [ $SUMMARY_MINIWDL_EXIT_CODE -ne 0 ]; then
           echo "Summary task failed with exit code $SUMMARY_MINIWDL_EXIT_CODE"

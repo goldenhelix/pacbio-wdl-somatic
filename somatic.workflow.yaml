@@ -1,28 +1,59 @@
 name: PacBio WGS Somatic Workflow
 description: Run PacBio WGS somatic analysis
 stages:
+  - name: Prepare Directories
+    description: Prepare output directories
+    task_path: tasks/prepare_directories.task.yaml
+    depends_on: []
+
+    task_parameters:
+      - name: input_tsv
+        label: Batch TSV File
+        type: file
+        pattern_match:
+          - '*.tsv'
+        help: "The batch file containing alignment files and their associated sample names."
+
+      - name: folder_name
+        label: Folder Name
+        type: string
+        optional: true
+        help: "The name of the output folder. If left blank, the name of the folder containing the batch TSV file will be used."
+
+      - name: base_output_folder
+        label: Base Output Folder
+        type: directory
+        supports_location_mode: 'no_append'
+        persist_key: "pacbio_wgs_somatic.base_output_folder"
+        help: "The base output folder, where the output folder will be created, for the PacBio WGS Somatic analysis."
+
   - name: Alignment with pbmm2
     description: Align PacBio HiFi reads to a reference genome using pbmm2 aligner.
     task_path: tasks/alignment.task.yaml
-    depends_on: []
+    depends_on:
+      - Prepare Directories
 
-    glob_parameter:
-      label: uBAM Base Folder
+    batch_file_parameter:
+      label: Alignment Files TSV
       path:
-        type: directory
-        supports_location_mode: 'read_only'
-      glob_ex: '*/*.bam'
+        base_path:
+          type: stage
+          stage: Prepare Directories
+          parameter: input_tsv
+        file: ''
+      help: "The batch file containing alignment files and their associated sample names."
       output_parameters:
+        - task_parameter_name: input_bams
+          expression: '${alignment_file}'
         - task_parameter_name: sample_name
-          expression: '${1}'
-        - task_parameter_name: input_folder
-          expression: '${file_directory}'
+          expression: '${sample_name}'
 
     task_parameters:
       - name: output_folder
         label: Output Folder
-        type: directory
-        supports_location_mode: 'no_append'
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
         label: Cache Udocker Image
@@ -39,14 +70,13 @@ stages:
       - name: input_folder
         label: Input Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: sample_type
         label: Sample Type
-        type: stage
-        stage: Alignment with pbmm2
-        stage_parameter_expression: "Somatic"
+        type: string
+        value: "Somatic"
 
   - name: Depth of Coverage with mosdepth
     description: Calculate depth of coverage for BAM.
@@ -58,9 +88,9 @@ stages:
       label: Alignment Folder
       path:
         type: stage
-        stage: Alignment with pbmm2
-        parameter: output_folder
-      glob_ex: '**/*.aligned.bam'
+        stage: Prepare Directories
+        parameter_expression: "${output_folder}"
+      glob_ex: '**/*.*.bam'
       output_parameters:
         - task_parameter_name: aligned_bam
           expression: '${0}'
@@ -71,7 +101,7 @@ stages:
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -90,15 +120,15 @@ stages:
       path:
         base_path:
           type: stage
-          stage: Alignment with pbmm2
-          parameter: output_folder
+          stage: Prepare Directories
+          parameter_expression: "${output_folder}"
         file: "batch_parameters.csv"
 
     task_parameters:
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -117,15 +147,15 @@ stages:
       path:
         base_path:
           type: stage
-          stage: Alignment with pbmm2
-          parameter: output_folder
+          stage: Prepare Directories
+          parameter_expression: "${output_folder}"
         file: "batch_parameters.csv"
 
     task_parameters:
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -144,8 +174,8 @@ stages:
       label: Alignment Folder
       path:
         type: stage
-        stage: Alignment with pbmm2
-        parameter: output_folder
+        stage: Prepare Directories
+        parameter_expression: "${output_folder}"
       glob_ex: '**/*.hiphase.bam'
       output_parameters:
         - task_parameter_name: phased_bam
@@ -155,7 +185,7 @@ stages:
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -174,21 +204,21 @@ stages:
       path:
         base_path:
           type: stage
-          stage: Alignment with pbmm2
-          parameter: output_folder
+          stage: Prepare Directories
+          parameter_expression: "${output_folder}"
         file: "batch_parameters.csv"
 
     task_parameters:
       - name: input_folder
         label: Input Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -207,21 +237,21 @@ stages:
       path:
         base_path:
           type: stage
-          stage: Alignment with pbmm2
-          parameter: output_folder
+          stage: Prepare Directories
+          parameter_expression: "${output_folder}"  
         file: "batch_parameters.csv"
 
     task_parameters:
       - name: input_folder
         label: Input Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: output_folder
         label: Output Folder
         type: stage
-        stage: Alignment with pbmm2
+        stage: Prepare Directories
         stage_parameter_expression: "${output_folder}"
 
       - name: cache_udocker_images
@@ -229,3 +259,56 @@ stages:
         type: stage
         stage: Alignment with pbmm2
         stage_parameter_expression: "${cache_udocker_images}"
+
+  - name: Generate VSBatch File for VSPipeline
+    description: Generate one VSBatch file per set of related samples
+    task_path: tasks/vspipeline-resources/generate_vsbatch.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Structural Variants
+      - CpG Pileup and DMR Analysis
+      - Phasing with HiPhase
+    
+    task_parameters:
+      - name: input_folder
+        label: Input Folder
+        type: stage
+        stage: Prepare Directories
+        stage_parameter_expression: "${output_folder}"
+
+      - name: vsproject_template
+        label: VarSeq Project Template
+        type: file
+        supports_location_mode: 'read_only'
+        help: "The template to use for the VarSeq project."
+        path: AppData/VarSeq/User Data/ProjectTemplates/
+
+      - name: overwrite_project
+        label: Overwrite Existing VarSeq Projects
+        type: boolean
+        value: "true"
+        help: "If enabled, existing VarSeq projects with the same name will be overwritten."
+
+      - name: cohort
+        label: Cohort Mode
+        type: boolean
+        value: "false"
+        help: "If enabled, put all samples into a single cohort group instead of finding relationships between them."
+
+  - name: Create VarSeq Project with VSPipeline
+    description: Create a VarSeq project with the VSPipeline based on the VSBatch file
+    task_path: tasks/vspipeline-resources/vspipeline.task.yaml
+    run_step: optional_default_skip
+    depends_on:
+      - Generate VSBatch File for VSPipeline
+
+    glob_parameter:
+      label: Input Folder
+      path:
+        type: stage
+        stage: Generate VSBatch File for VSPipeline
+        parameter: input_folder
+      glob_ex: '**/*.vsbatch'
+      output_parameters:
+        - task_parameter_name: vsbatch_file
+          expression: '${0}'
