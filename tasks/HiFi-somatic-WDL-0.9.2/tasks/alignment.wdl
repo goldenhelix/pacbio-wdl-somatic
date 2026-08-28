@@ -7,7 +7,10 @@ workflow align_all_bams {
         Array[File] bam_files
         File ref_fasta
         File ref_fasta_index
-        Int pbmm2_threads = 64
+        # Callers should override this with the agent's real core count. The old
+        # default of 64 was silently wrong on the 48-core agents this runs on:
+        # miniwdl clamps runtime.cpu to the host, but "-j 64" still reached pbmm2.
+        Int pbmm2_threads = 32
         Int merge_bam_threads = 8
         Int samtools_threads = 8
         Boolean skip_align = false
@@ -91,8 +94,16 @@ task Align {
     Int threads
   }
 
-  String ofile_name = sub(basename(bam_file), "\\.bam$", ".aligned.bam")
-  String ofile_name_index = sub(basename(bam_file), "\\.bam$", ".aligned.bam.bai")
+  # Strip the extension, then append -- rather than substituting ".bam$" directly.
+  # When two inputs share a basename, miniwdl disambiguates by appending a hash
+  # ("reads.bam-1265f13b53264fd1"), which no longer matches "\\.bam$". The old
+  # substitution then left ofile_name identical to the input name and pbmm2 died
+  # with 'Unknown file suffix'. Stripping tolerates the suffix, and if the regex
+  # matches nothing the name still differs from the input, so input != output holds.
+  String base_name = basename(bam_file)
+  String stripped_name = sub(base_name, "\\.bam(-[A-Za-z0-9]+)?$", "")
+  String ofile_name = stripped_name + ".aligned.bam"
+  String ofile_name_index = stripped_name + ".aligned.bam.bai"
   Float file_size = ceil(size(bam_file, "GB") * 2 + size(ref_fasta, "GB") + 20)
   
   command <<<
@@ -102,6 +113,12 @@ task Align {
   
   pbmm2 --version
 
+  # Log to stderr and tee to pbmm2.log, rather than using --log-file.
+  # pbmm2 buffers --log-file through pbcopper's async logger and flushes on clean
+  # shutdown only, so an abort() discards the buffer -- every failed run left a
+  # 0-byte pbmm2.log and no error message. Piping through tee keeps the message on
+  # stderr (captured by miniwdl) AND on disk, and bash waits for tee to drain.
+  # pipefail is set above, so pbmm2's exit status still propagates through the pipe.
   pbmm2 align \
     ~{ref_fasta} \
     ~{bam_file} \
@@ -110,9 +127,9 @@ task Align {
     --sort -j ~{threads} \
     --unmapped \
     --preset HIFI \
-    --log-level INFO --log-file pbmm2.log \
+    --log-level INFO \
     ~{if(strip_kinetics) then "--strip" else ""} \
-    ~{additional_args}
+    ~{additional_args} 2>&1 | tee pbmm2.log
   >>>
 
   output {
@@ -124,9 +141,16 @@ task Align {
   runtime {
     docker: "quay.io/pacbio/pbmm2:1.17.0_build1"
     cpu: threads
-    memory: "~{threads * 4} GB"
+    # 2 GB/thread, not 4. At the previous 4x, a 64-thread request asked for 256 GB;
+    # miniwdl clamped it to the 96 GB host limit and logged a warning, while the
+    # command line still shipped "-j 64" into a 48-CPU container. Callers should
+    # pass pbmm2_threads = the agent's actual core count so -j matches reality.
+    memory: "~{threads * 2} GB"
     disk: file_size + " GB"
-    maxRetries: 2
+    # A truncated or malformed input fails identically every time, so retries just
+    # multiply the wall-clock cost of a deterministic failure. Inputs are validated
+    # up front by the calling task; keep one retry for genuinely transient faults.
+    maxRetries: 1
     preemptible: 1
   }
 }

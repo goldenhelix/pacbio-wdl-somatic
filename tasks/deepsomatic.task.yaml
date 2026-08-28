@@ -47,6 +47,11 @@ steps:
       - |- # shell
         set -eu pipefail
 
+        # Fail fast on truncated/corrupt sequence inputs. O(1) per file:
+        # reads the first 18 bytes and last 1 MiB, never the whole file.
+        source "$TASK_DIR/utils/validate_sequence_inputs.sh"
+        validate_sequence_inputs_csv "${tumor_aligned_bam:-}" "${normal_aligned_bam:-}"
+
         echo "*************************"
         echo "Starting DeepSomatic Task"
         echo "Space on agent: $(df -h /scratch | tail -n 1 | awk '{print $4}')"

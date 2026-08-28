@@ -37,7 +37,9 @@ steps:
     type: cmd
     args: 
       - |- # shell
-        set -eu pipefail
+        # NOTE: "set -eu pipefail" is NOT the same as "set -euo pipefail" --
+        # the bare word is taken as a positional arg, so pipefail stays OFF.
+        set -euo pipefail
 
         echo "*************************"
         echo "Starting Tumor/Normal Alignment Task"
@@ -88,6 +90,7 @@ steps:
 
         # Source common utility functions
         source "$TASK_DIR/utils/utils.sh"
+        source "$TASK_DIR/utils/validate_sequence_inputs.sh"
 
         # Set up resources path based on resources_path
         PB_RESOURCES_DIR="${WORKSPACE_DIR}/${RESOURCES_PATH}/hifisomatic_resources"
@@ -169,16 +172,31 @@ steps:
           input_files=("$input_bams")
         fi
         
+        # Validate every input BAM before committing hours of compute to it.
+        # This is O(1) per file -- it reads the first 18 bytes and the last 1 MiB,
+        # never the whole BAM -- so it is safe to run on 18 GB inputs over CIFS.
+        # A truncated uBAM previously burned ~3h of alignment across 3 retries
+        # before pbmm2 aborted with an empty log.
+        echo "================================================"
+        if ! validate_sequence_files "${input_files[@]}"; then
+          echo "================================================"
+          echo "Aborting before alignment: one or more input BAMs are not intact."
+          exit 1
+        fi
+        echo "================================================"
+
         # Build JSON array from input files
         input_bams_json="["
         first=true
         for bam_file in "${input_files[@]}"; do
-          # Verify file exists
+          # Existence/integrity already enforced above -- a file that is missing
+          # here is a logic error, and silently skipping it would quietly reduce
+          # coverage for a somatic analysis.
           if [ ! -f "$bam_file" ]; then
-            echo "Warning: Input BAM file not found: $bam_file, skipping"
-            continue
+            echo "❌ ERROR: Input BAM file disappeared after validation: $bam_file"
+            exit 1
           fi
-          
+
           if [ "$first" = true ]; then
             first=false
           else
@@ -220,16 +238,21 @@ steps:
         ALIGNMENT_START_TIME=$(date +%s)
         
         # Generate alignment input JSON
+        # Pass the agent's real core count through so pbmm2's "-j" matches the
+        # container it actually gets. miniwdl clamps runtime.cpu to the host but
+        # cannot rewrite the command line, so a hardcoded default would oversubscribe.
         jq -n \
           --arg patient "$sample_name" \
           --argjson bam_files "$input_bams_json" \
           --arg ref_fasta "$LOCAL_REF_FASTA" \
           --arg ref_fasta_index "$LOCAL_REF_INDEX" \
+          --argjson pbmm2_threads "$AGENT_CPU_CORES" \
           '{
             "align_all_bams.patient": $patient,
             "align_all_bams.bam_files": $bam_files,
             "align_all_bams.ref_fasta": $ref_fasta,
-            "align_all_bams.ref_fasta_index": $ref_fasta_index
+            "align_all_bams.ref_fasta_index": $ref_fasta_index,
+            "align_all_bams.pbmm2_threads": $pbmm2_threads
           }' > /scratch/inputs.json
 
         # Run miniwdl and capture exit code, but don't exit on failure
@@ -240,7 +263,7 @@ steps:
           --dir /scratch \
           --runtime-cpu-max=$AGENT_CPU_CORES \
           --runtime-memory-max=${AGENT_MEMORY_GB}G \
-          -i /scratch/inputs.json 2>/dev/null
+          -i /scratch/inputs.json 2> >(tee /scratch/miniwdl.stderr.log >&2)
 
         MINIWDL_EXIT_CODE=$?
         set -e
@@ -252,13 +275,25 @@ steps:
         ALIGNMENT_DURATION_MIN=$(((ALIGNMENT_DURATION % 3600) / 60))
         ALIGNMENT_DURATION_SEC=$((ALIGNMENT_DURATION % 60))
         
+        # Report the ACTUAL outcome. This banner used to print unconditionally,
+        # before MINIWDL_EXIT_CODE was ever examined, so a failed alignment logged
+        # "COMPLETED SUCCESSFULLY" and the real error was buried further down.
         echo "================================================"
-        echo "✅ ALIGNMENT COMPLETED SUCCESSFULLY"
+        if [ $MINIWDL_EXIT_CODE -eq 0 ]; then
+          echo "✅ ALIGNMENT COMPLETED SUCCESSFULLY"
+        else
+          echo "❌ ALIGNMENT FAILED (miniwdl exit code $MINIWDL_EXIT_CODE)"
+        fi
         echo "================================================"
         echo "⏱️  Execution Time: ${ALIGNMENT_DURATION_HOUR}h ${ALIGNMENT_DURATION_MIN}m ${ALIGNMENT_DURATION_SEC}s"
-        echo "📁 Output Files:"
-        echo "  - Aligned BAM: ${sample_name}.aligned.bam"
-        echo "  - BAM Index: ${sample_name}.aligned.bam.bai"
+        if [ $MINIWDL_EXIT_CODE -eq 0 ]; then
+          echo "📁 Output Files:"
+          echo "  - Aligned BAM: ${sample_name}.aligned.bam"
+          echo "  - BAM Index: ${sample_name}.aligned.bam.bai"
+        else
+          echo "📄 miniwdl stderr captured at /scratch/miniwdl.stderr.log"
+          echo "   Debug bundle will be written to the output folder below."
+        fi
         echo "================================================"
 
         # Copy udocker cache to output folder
